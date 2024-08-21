@@ -1,0 +1,5 @@
+; API functions
+hyp_early_alloc_page
+hyp_early_alloc_init
+hyp_early_alloc_contig
+hyp_early_alloc_nr_pages

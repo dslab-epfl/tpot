@@ -1,0 +1,1 @@
+#define malloc(size) __tpot_malloc(size)

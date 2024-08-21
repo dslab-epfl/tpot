@@ -1,0 +1,473 @@
+#pragma once
+
+// -- Contract API --
+
+fixpoint option<v> ghostmap_get<k, v>(list<pair<k, v> > ghostmap, k key) {
+  switch(ghostmap) {
+    case nil:
+      return none;
+    case cons(h, t):
+      return switch(h) {
+        case pair(hk, hv):
+          return hk == key ? some(hv) : ghostmap_get(t, key);
+      };
+  }
+}
+
+fixpoint list<pair<k, v> > ghostmap_set<k, v>(list<pair<k, v> > ghostmap, k key, v value) {
+  switch(ghostmap) {
+    case nil:
+      return cons(pair(key, value), nil);
+    case cons(h, t):
+      return switch(h) {
+        case pair(hk, hv):
+          return hk == key ? ghostmap_set(t, key, value) : cons(h, ghostmap_set(t, key, value));
+      };
+  }
+}
+
+fixpoint list<pair<k, v> > ghostmap_remove<k, v>(list<pair<k, v> > ghostmap, k key) {
+  switch(ghostmap) {
+    case nil:
+      return nil;
+    case cons(h, t):
+      return switch(h) {
+        case pair(hk, hv):
+          return hk == key ? ghostmap_remove(t, key) : cons(h, ghostmap_remove(t, key));
+      };
+  }
+}
+
+fixpoint bool ghostmap_forall<k, v>(list<pair<k, v> > ghostmap, fixpoint(k, v, bool) pred) {
+  switch(ghostmap) {
+    case nil:
+      return true;
+    case cons(h, t):
+      return switch(h) {
+        case pair(hk, hv):
+          return pred(hk, hv) && ghostmap_forall(t, pred);
+      };
+  }
+}
+
+
+// -- Proof API --
+
+fixpoint bool ghostmap_distinct<k, v>(list<pair<k, v> > ghostmap) {
+  return distinct(map(fst, ghostmap));
+}
+
+fixpoint bool ghostmap_has<k, v>(list<pair<k, v> > ghostmap, k key) {
+  return ghostmap_get(ghostmap, key) != none;
+}
+
+
+// -- Lemmas --
+
+// Some of the normal lemmas should be autolemmas but VeriFast either errors or crashes if that's the case
+
+// The 'assert h == pair(_, _);' lines are required for VeriFast to figure it out
+
+lemma void ghostmap_value_notmem_implies_notget<k, v>(list<pair<k, v> > ghostmap, k key, v value)
+requires false == mem(value, map(snd, ghostmap));
+ensures ghostmap_get(ghostmap, key) != some(value);
+{
+  switch(ghostmap) {
+    case nil:
+    case cons(h, t):
+      assert h == pair(?hk, ?hv);
+      if (hk != key) {
+        ghostmap_value_notmem_implies_notget(t, key, value);
+      }
+  }
+}
+
+lemma_auto(ghostmap_get(ghostmap, key)) void ghostmap_get_implies_mem1<k, v>(list<pair<k, v> > ghostmap, k key)
+requires ghostmap_get(ghostmap, key) != none;
+ensures true == mem(key, map(fst, ghostmap));
+{
+  switch(ghostmap) {
+    case nil:
+    case cons(h, t):
+      assert h == pair(?hk, ?hv);
+      if (hk != key) {
+        ghostmap_get_implies_mem1(t, key);
+      }
+  }
+}
+
+lemma_auto(ghostmap_get(ghostmap, key)) void ghostmap_get_implies_mem2<k, v>(list<pair<k, v> > ghostmap, k key)
+requires ghostmap_get(ghostmap, key) == none;
+ensures false == mem(key, map(fst, ghostmap));
+{
+  switch(ghostmap) {
+    case nil:
+    case cons(h, t):
+      assert h == pair(?hk, ?hv);
+      if (hk != key) {
+        ghostmap_get_implies_mem2(t, key);
+      }
+  }
+}
+
+lemma_auto(ghostmap_set(ghostmap, key, value)) void ghostmap_set_new_value_increases_length<k, v>(list<pair<k, v> > ghostmap, k key, v value)
+requires ghostmap_get(ghostmap, key) == none;
+ensures length(ghostmap_set(ghostmap, key, value)) == length(ghostmap) + 1;
+{
+  switch(ghostmap) {
+    case nil:
+    case cons(h, t):
+      assert h == pair(?hk, ?hv);
+      if (hk != key) {
+        ghostmap_set_new_value_increases_length(t, key, value);
+      }
+  }
+}
+
+lemma_auto(ghostmap_set(ghostmap, key, value)) void ghostmap_set_then_get<k, v>(list<pair<k, v> > ghostmap, k key, v value)
+requires true;
+ensures ghostmap_get(ghostmap_set(ghostmap, key, value), key) == some(value);
+{
+  switch(ghostmap) {
+    case nil:
+    case cons(h, t):
+      assert h == pair(_, _);
+      ghostmap_set_then_get(t, key, value);
+  }
+}
+
+lemma_auto void ghostmap_set_preserves_other<k, v>(list<pair<k, v> > ghostmap, k key, v value, k other_key)
+requires other_key != key;
+ensures ghostmap_get(ghostmap_set(ghostmap, key, value), other_key) == ghostmap_get(ghostmap, other_key);
+{
+  switch(ghostmap) {
+    case nil:
+    case cons(h, t):
+      assert h == pair(_, _);
+      ghostmap_set_preserves_other(t, key, value, other_key);
+  }
+}
+
+lemma void ghostmap_set_new_preserves_notmem<k, v>(list<pair<k, v> > ghostmap, k key, v value, k other_key)
+requires false == mem(other_key, map(fst, ghostmap)) &*&
+         other_key != key;
+ensures false == mem(other_key, map(fst, ghostmap_set(ghostmap, key, value)));
+{
+  switch(ghostmap) {
+    case nil:
+    case cons(h, t):
+      assert h == pair(_, _);
+      ghostmap_set_new_preserves_notmem(t, key, value, other_key);
+  }
+}
+
+lemma_auto void ghostmap_set_preserves_distinct<k, v>(list<pair<k, v> > ghostmap, k key, v value)
+requires true == ghostmap_distinct(ghostmap);
+ensures true == ghostmap_distinct(ghostmap_set(ghostmap, key, value));
+{
+  switch(ghostmap) {
+    case nil:
+    case cons(h, t):
+      assert h == pair(?hk, ?hv);
+      ghostmap_set_preserves_distinct(t, key, value);
+      if (hk != key) {
+        ghostmap_set_new_preserves_notmem(t, key, value, hk);
+      }
+  }
+}
+
+lemma void ghostmap_get_none_after_remove<k, v>(list<pair<k, v> > ghostmap, k key)
+requires emp;
+ensures ghostmap_get(ghostmap_remove(ghostmap, key), key) == none;
+{
+  switch(ghostmap) {
+    case nil:
+    case cons(h, t):
+      assert h == pair(_, _);
+      ghostmap_get_none_after_remove(t, key);
+  }
+}
+
+lemma_auto void ghostmap_set_remove_different_key_interchangeable<k, v>(list<pair<k, v> > ghostmap, k key, v value, k other_key)
+requires key != other_key;
+ensures ghostmap_set(ghostmap_remove(ghostmap, other_key), key, value) == ghostmap_remove(ghostmap_set(ghostmap, key, value), other_key);
+{
+  switch(ghostmap) {
+    case nil:
+    case cons(h, t):
+      assert h == pair(_, _);
+      ghostmap_set_remove_different_key_interchangeable(t, key, value, other_key);
+  }
+}
+
+lemma_auto void ghostmap_remove_preserves_other<k, v>(list<pair<k, v> > ghostmap, k key, k absent_key)
+requires absent_key != key;
+ensures ghostmap_get(ghostmap_remove(ghostmap, key), absent_key) == ghostmap_get(ghostmap, absent_key);
+{
+  switch(ghostmap) {
+    case nil:
+    case cons(h, t):
+      assert h == pair(_, _);
+      ghostmap_remove_preserves_other(t, key, absent_key);
+  }
+}
+
+lemma_auto(ghostmap_remove(ghostmap, key)) void ghostmap_remove_preserves_distinct<k, v>(list<pair<k, v> > ghostmap, k key)
+requires true == ghostmap_distinct(ghostmap);
+ensures true == ghostmap_distinct(ghostmap_remove(ghostmap, key));
+{
+  switch(ghostmap) {
+    case nil:
+    case cons(h, t):
+      assert h == pair(?hk, ?hv);
+      ghostmap_remove_preserves_distinct(t, key);
+      if (hk != key) {
+        if (ghostmap_get(t, hk) == none) { /* Nothing, but necessary for VeriFast to prove this */ }
+        ghostmap_remove_preserves_other(t, key, hk);
+      }
+  }
+}
+
+lemma_auto(ghostmap_remove(ghostmap, key)) void ghostmap_remove_unchanged_when_missing<k, v>(list<pair<k, v> > ghostmap, k key)
+requires ghostmap_get(ghostmap, key) == none;
+ensures ghostmap_remove(ghostmap, key) == ghostmap;
+{
+  switch(ghostmap) {
+    case nil:
+    case cons(h, t):
+      assert h == pair(?hk, ?hv);
+      if (hk != key) {
+        ghostmap_remove_unchanged_when_missing(t, key);
+      }
+  }
+}
+
+lemma void ghostmap_remove_decreases_length<k, v>(list<pair<k, v> > ghostmap, k key)
+requires emp;
+ensures length(ghostmap_remove(ghostmap, key)) <= length(ghostmap);
+{
+  switch(ghostmap) {
+    case nil:
+    case cons(h, t):
+      assert h == pair(_, _);
+      ghostmap_remove_decreases_length(t, key);
+  }
+}
+
+lemma_auto void ghostmap_remove_when_present_decreases_length<k, v>(list<pair<k, v> > ghostmap, k key)
+requires none != ghostmap_get(ghostmap, key);
+ensures length(ghostmap_remove(ghostmap, key)) < length(ghostmap);
+{
+  switch(ghostmap) {
+    case nil:
+    case cons(h, t):
+      assert h == pair(?hk, ?hv);
+      ghostmap_remove_decreases_length(t, key);
+      if (hk != key) {
+        ghostmap_remove_when_present_decreases_length(t, key);
+      }
+  }
+}
+
+lemma void ghostmap_remove_when_distinct_and_present_decreases_length<k, v>(list<pair<k, v> > ghostmap, k key)
+requires true == ghostmap_distinct(ghostmap) &*&
+         none != ghostmap_get(ghostmap, key);
+ensures length(ghostmap_remove(ghostmap, key)) == length(ghostmap) - 1;
+{
+  switch(ghostmap) {
+    case nil:
+    case cons(h, t):
+      assert h == pair(?hk, ?hv);
+      if (hk == key) {
+        ghostmap_remove_unchanged_when_missing(t, key);
+      } else {
+        ghostmap_remove_when_distinct_and_present_decreases_length(t, key);
+      }
+  }
+}
+
+lemma_auto void ghostmap_remove_order_is_irrelevant<k, v>(list<pair<k, v> > ghostmap, k key, k other_key)
+requires true;
+ensures ghostmap_remove(ghostmap_remove(ghostmap, key), other_key) == ghostmap_remove(ghostmap_remove(ghostmap, other_key), key);
+{
+  switch(ghostmap) {
+    case nil:
+    case cons(h, t):
+      assert h == pair(_, _);
+      ghostmap_remove_order_is_irrelevant(t, key, other_key);
+  }
+}
+
+lemma_auto void ghostmap_remove_cancels_set<k, v>(list<pair<k, v> > ghostmap, k key, v value)
+requires none == ghostmap_get(ghostmap, key);
+ensures ghostmap_remove(ghostmap_set(ghostmap, key, value), key) == ghostmap;
+{
+  switch(ghostmap) {
+    case nil:
+    case cons(h, t):
+      assert h == pair(_, _);
+      ghostmap_remove_cancels_set(t, key, value);
+  }
+}
+
+lemma_auto void ghostmap_remove_preserves_notmem<k, v>(list<pair<k, v> > ghostmap, k key, v value)
+requires false == mem(value, map(snd, ghostmap));
+ensures false == mem(value, map(snd, ghostmap_remove(ghostmap, key)));
+{
+  switch(ghostmap) {
+    case nil:
+    case cons(h, t):
+      assert h == pair(_, _);
+      ghostmap_remove_preserves_notmem(t, key, value);
+  }
+}
+
+lemma void ghostmap_remove_preserves_forall<k, v>(list<pair<k, v> > ghostmap, fixpoint(k, v, bool) pred, k key)
+requires true == ghostmap_forall(ghostmap, pred);
+ensures true == ghostmap_forall(ghostmap_remove(ghostmap, key), pred);
+{
+  switch(ghostmap) {
+    case nil:
+    case cons(h, t):
+      assert h == pair(_, _);
+      ghostmap_remove_preserves_forall(t, pred, key);
+  }
+}
+
+lemma void ghostmap_forall_implies_pred<k, v>(list<pair<k, v> > ghostmap, fixpoint(k, v, bool) pred, k key, v value)
+requires true == ghostmap_forall(ghostmap, pred) &*&
+         some(value) == ghostmap_get(ghostmap, key);
+ensures true == pred(key, value);
+{
+  switch(ghostmap) {
+    case nil:
+    case cons(h, t):
+      assert h == pair(?hk, ?hv);
+      if (hk != key) {
+        ghostmap_forall_implies_pred(t, pred, key, value);
+      }
+  }
+}
+
+lemma void ghostmap_notpred_implies_notforall<k, v>(list<pair<k, v> > ghostmap, fixpoint(k, v, bool) pred, k key)
+requires ghostmap_get(ghostmap, key) == some(?value) &*&
+         false == pred(key, value);
+ensures false == ghostmap_forall(ghostmap, pred);
+{
+  switch(ghostmap) {
+    case nil:
+      assert false;
+    case cons(h, t):
+      assert h == pair(?hk, ?hv);
+      if (hk != key) {
+        ghostmap_notpred_implies_notforall(t, pred, key);
+      }
+  }
+}
+
+lemma void ghostmap_extra_preserves_forall<k, v>(list<pair<k, v> > ghostmap, fixpoint (k, v, bool) pred, k key, v value)
+requires true == ghostmap_forall(ghostmap_remove(ghostmap, key), pred) &*&
+         some(value) == ghostmap_get(ghostmap, key) &*&
+         length(ghostmap_remove(ghostmap, key)) == length(ghostmap) - 1 &*&
+         true == pred(key, value);
+ensures true == ghostmap_forall(ghostmap, pred);
+{
+  switch(ghostmap) {
+    case nil:
+    case cons(h, t):
+      assert h == pair(?hk, ?hv);
+      if (hk == key) {
+        if (ghostmap_get(t, key) == none) {
+          ghostmap_remove_unchanged_when_missing(t, key);
+        }
+      } else {
+        ghostmap_extra_preserves_forall(t, pred, key, value);
+      }
+  }
+}
+
+
+// --- Lemmas that use forall_ ---
+
+// These lemmas are somewhat odd because of forall_'s nature, it's not always easy to prove things and it sometimes requires... creative proofs.
+
+// This one must use 'int' as the key because that's how it's used below; otherwise, using Z3 fails to prove
+lemma void ghostmap_has_nothing_implies_nil<v>(list<pair<int, v> > ghostmap)
+requires forall_(int key; false == ghostmap_has(ghostmap, key));
+ensures ghostmap == nil;
+{
+  switch(ghostmap) {
+    case nil:
+    case cons(h, t):
+      assert h == pair(?hk, ?hv);
+      // This line is required when using Redux,
+      // but it causes console output about an inconsistency;
+      // this is normal, see https://github.com/verifast/verifast/issues/32
+      assert false == ghostmap_has(ghostmap, hk);
+  }
+}
+
+fixpoint bool _bounds_check(int a, int n, int b) { return a <= n && n < b; }
+lemma void ghostmap_array_size_HACK<v>(list<pair<int, v> > remaining, int size, int i, int i2)
+requires forall_(int n; _bounds_check(i2, n, size) == ghostmap_has(remaining, n) || n == i) &*& i2 == i + 1;
+ensures forall_(int n; _bounds_check(i2, n, size) == ghostmap_has(ghostmap_remove(remaining, i), n) || n == i);
+{
+  // Nothing needed, VeriFast can prove this on its own but only in isolation
+}
+lemma void ghostmap_array_size<v>(list<pair<int, v> > ghostmap, int size)
+requires forall_(int n; _bounds_check(0, n, size) == ghostmap_has(ghostmap, n)) &*&
+         true == ghostmap_distinct(ghostmap) &*&
+         size >= 0;
+ensures length(ghostmap) == size;
+{
+  list<pair<int, v> > remaining = ghostmap;
+  for (int i = 0; i < size; i++)
+  invariant 0 <= i &*& i <= size &*&
+            forall_(int n; _bounds_check(i, n, size) == ghostmap_has(remaining, n)) &*&
+            true == ghostmap_distinct(remaining) &*&
+            length(ghostmap) == length(remaining) + i;
+  decreases size - i;
+  {
+    assert true == ghostmap_has(remaining, i);
+    list<pair<int, v> > next = ghostmap_remove(remaining, i);
+    ghostmap_get_none_after_remove(remaining, i);
+    ghostmap_array_size_HACK(remaining, size, i, i + 1);
+    ghostmap_remove_when_distinct_and_present_decreases_length(remaining, i);
+    remaining = next;
+  }
+  ghostmap_has_nothing_implies_nil(remaining);
+}
+
+lemma void ghostmap_array_max_size_HACK<v>(list<pair<int, v> > remaining, int size, int i, int i2)
+requires forall_(int n; !ghostmap_has(remaining, n) || _bounds_check(i2, n, size) || n == i) &*& i2 == i + 1;
+ensures forall_(int n; !ghostmap_has(ghostmap_remove(remaining, i), n) || _bounds_check(i2, n, size) || n == i);
+{
+  // Nothing needed, VeriFast can prove this on its own but only in isolation
+}
+lemma void ghostmap_array_max_size<v>(list<pair<int, v> > ghostmap, int size, int missing)
+requires forall_(int n; !ghostmap_has(ghostmap, n) || _bounds_check(0, n, size)) &*&
+         true == ghostmap_distinct(ghostmap) &*&
+         size >= 0 &*&
+         none == ghostmap_get(ghostmap, missing) &*&
+         0 <= missing &*& missing < size;
+ensures length(ghostmap) < size;
+{
+  list<pair<int, v> > remaining = ghostmap;
+  for (int i = 0; i < size; i++)
+  invariant 0 <= i &*& i <= size &*&
+            forall_(int n; !ghostmap_has(remaining, n) || _bounds_check(i, n, size)) &*&
+            true == ghostmap_distinct(remaining) &*&
+            none == ghostmap_get(remaining, missing) &*&
+            length(ghostmap) <= length(remaining) + i - (i > missing ? 1 : 0);
+  decreases size - i;
+  {
+    if (ghostmap_has(remaining, i)) {
+      list<pair<int, v> > next = ghostmap_remove(remaining, i);
+      ghostmap_get_none_after_remove(remaining, i);
+      ghostmap_array_max_size_HACK(remaining, size, i, i + 1);
+      ghostmap_remove_when_distinct_and_present_decreases_length(remaining, i);
+      remaining = next;
+    }
+  }
+  ghostmap_has_nothing_implies_nil(remaining);
+}

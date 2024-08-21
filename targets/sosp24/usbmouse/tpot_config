@@ -1,0 +1,12 @@
+; API functions
+usb_mouse_open
+usb_mouse_close
+usb_mouse_irq
+usb_mouse_probe
+usb_mouse_disconnect
+; Invariants to use
+spec__usb_mouse_open: inv__input_dev
+spec__usb_mouse_close: inv__input_dev
+spec__usb_mouse_irq: inv__urb
+spec__usb_mouse_probe: inv__intf
+spec__usb_mouse_disconnect: inv__intf

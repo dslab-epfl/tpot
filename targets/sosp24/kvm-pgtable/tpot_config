@@ -1,0 +1,4 @@
+; API functions
+kvm_set_table_pte
+kvm_set_valid_leaf_pte
+hyp_map_set_prot_attr

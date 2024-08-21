@@ -1,0 +1,948 @@
+//===-- Executor.h ----------------------------------------------*- C++ -*-===//
+//
+//                     The KLEE Symbolic Virtual Machine
+//
+// This file is distributed under the University of Illinois Open Source
+// License. See LICENSE.TXT for details.
+//
+//===----------------------------------------------------------------------===//
+//
+// Class to perform actual execution, hides implementation details from external
+// interpreter.
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef KLEE_EXECUTOR_H
+#define KLEE_EXECUTOR_H
+
+#include "ExecutionState.h"
+#include "UserSearcher.h"
+
+#include "klee/ADT/RNG.h"
+#include "klee/Core/BranchTypes.h"
+#include "klee/Core/Interpreter.h"
+#include "klee/Core/TerminationTypes.h"
+#include "klee/Expr/ArrayCache.h"
+#include "klee/Expr/ArrayExprOptimizer.h"
+#include "klee/Module/Cell.h"
+#include "klee/Module/KInstruction.h"
+#include "klee/Module/KModule.h"
+#include "klee/System/Time.h"
+
+#include "../Solver/SytZ3Dumper.h"
+
+#include "llvm/ADT/Twine.h"
+#include "llvm/Support/raw_ostream.h"
+
+#include <map>
+#include <memory>
+#include <set>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+struct KTest;
+
+namespace llvm {
+  class BasicBlock;
+  class BranchInst;
+  class CallInst;
+  class LandingPadInst;
+  class Constant;
+  class ConstantExpr;
+  class Function;
+  class GlobalValue;
+  class Instruction;
+  class LLVMContext;
+  class DataLayout;
+  class Twine;
+  class Value;
+}
+
+namespace klee {  
+  class Array;
+  struct Cell;
+  class ExecutionState;
+  class ExternalDispatcher;
+  class Expr;
+  class InstructionInfoTable;
+  struct KFunction;
+  struct KInstruction;
+  class KInstIterator;
+  class KModule;
+  class MemoryManager;
+  class MemoryObject;
+  class ObjectState;
+  class PTree;
+  class Searcher;
+  class SeedInfo;
+  class SpecialFunctionHandler;
+  struct StackFrame;
+  class StatsTracker;
+  class TimingSolver;
+  class TreeStreamWriter;
+  class MergeHandler;
+  class MergingSearcher;
+  template<class T> class ref;
+
+  enum MemOpResult {MemOp_Success, MemOp_OOB, MemOp_Error};
+  class NoOpResolutionList {
+  public:
+    std::vector<std::pair<const MemoryObject *, ref<Expr>>> objects;
+    std::pair<const ForallZone *, ref<Expr>> fzone;
+
+    NoOpResolutionList() {
+      fzone.first = nullptr;
+      fzone.second = nullptr;
+    }
+
+    // constructor for singleton instances
+    NoOpResolutionList(const MemoryObject *mo) {
+      fzone.first = nullptr;
+      fzone.second = nullptr;
+      objects.push_back(std::make_pair(mo, ConstantExpr::create(1, Expr::Bool)));
+    }
+
+    bool isSingleResolution() const {
+      bool res = objects.size() == 1 && fzone.first == nullptr;
+      if (res) {
+        assert(objects[0].second == ConstantExpr::create(1, Expr::Bool));
+        assert(fzone.second.isNull());
+      }
+      return res;
+    }
+
+    bool isFZoneResolution() const {
+      bool res = objects.size() == 0 && fzone.first != nullptr;
+      if (res) {
+        assert(fzone.second == ConstantExpr::create(1, Expr::Bool));
+      }
+      return res;
+    } 
+
+    void add(const ForallZone *fz, ref<Expr> e) {
+      // rl can't contain two fzones. Make sure we're not overriding.
+      assert(fzone.first == nullptr && fzone.second.isNull());
+      fzone.first = fz;
+      fzone.second = e;
+    }
+    void add(const MemoryObject *fz, ref<Expr> e) {
+      objects.push_back(std::make_pair(fz, e));
+    }
+
+    NoOpResolutionList concat(const NoOpResolutionList &other) const {
+      NoOpResolutionList res;
+      res.objects.insert(res.objects.end(), objects.begin(), objects.end());
+      res.objects.insert(res.objects.end(), other.objects.begin(), other.objects.end());
+      if (fzone.first != nullptr) {
+        assert(fzone.second != nullptr);
+        res.add(fzone.first, fzone.second);
+      }
+      if (other.fzone.first != nullptr) {
+        assert(!other.fzone.second.isNull());
+        res.add(other.fzone.first, other.fzone.second);
+      }
+      return res;
+    }    
+
+    bool empty() {
+      return objects.empty() && fzone.first == nullptr;
+    }
+  };
+
+  /// \todo Add a context object to keep track of data only live
+  /// during an instruction step. Should contain addedStates,
+  /// removedStates, and haltExecution, among others.
+
+class Executor : public Interpreter {
+  friend class OwningSearcher;
+  friend class WeightedRandomSearcher;
+  friend class SpecialFunctionHandler;
+  friend class StatsTracker;
+  friend class MergeHandler;
+  friend klee::Searcher *klee::constructUserSearcher(Executor &executor);
+
+public:
+  typedef std::pair<ExecutionState*,ExecutionState*> StatePair;
+
+  /// The random number generator.
+  RNG theRNG;
+
+private:
+  std::unique_ptr<KModule> kmodule;
+  InterpreterHandler *interpreterHandler;
+  Searcher *searcher;
+
+  ExternalDispatcher *externalDispatcher;
+  TimingSolver *solver;
+  SytZ3Dumper *sytPostStateSolver;
+  MemoryManager *memory;
+  std::set<ExecutionState*, ExecutionStateIDCompare> states;
+  StatsTracker *statsTracker;
+  TreeStreamWriter *pathWriter, *symPathWriter;
+  SpecialFunctionHandler *specialFunctionHandler;
+  TimerGroup timers;
+  std::unique_ptr<PTree> processTree;
+
+  //TODO: move all loop summarization related stuff to a separate class
+  // Stores lambdas passed to assumeForall calls.
+  std::vector<llvm::Function *> assumeForallHints;
+
+  // maps loop headers to paris of hints and invariant schema indices.
+  std::map<llvm::BasicBlock *, std::pair<llvm::Function *, unsigned>> curLoopInvariants;
+
+  // Stores addresses that might store unique objects, and the corresponding object sizes.
+  // The ground truth is still determined by the is_uniq SMT function, but these hints help.
+  // We need this because our approach is still not complete when there are quantified uniqptr assumptions.
+  std::vector<std::pair<ref<Expr>, ref<Expr>>> uniqPtrHints;
+
+  std::vector<std::vector<ExecutionState *>> lambdaParentAddedStates;
+
+  /// Used to track states that have been added during the current
+  /// instructions step. 
+  /// \invariant \ref addedStates is a subset of \ref states. 
+  /// \invariant \ref addedStates and \ref removedStates are disjoint.
+  std::vector<ExecutionState *> addedStates;
+  /// Used to track states that have been removed during the current
+  /// instructions step. 
+  /// \invariant \ref removedStates is a subset of \ref states. 
+  /// \invariant \ref addedStates and \ref removedStates are disjoint.
+  std::vector<ExecutionState *> removedStates;
+
+  /// When non-empty the Executor is running in "seed" mode. The
+  /// states in this map will be executed in an arbitrary order
+  /// (outside the normal search interface) until they terminate. When
+  /// the states reach a symbolic branch then either direction that
+  /// satisfies one or more seeds will be added to this map. What
+  /// happens with other states (that don't satisfy the seeds) depends
+  /// on as-yet-to-be-determined flags.
+  std::map<ExecutionState*, std::vector<SeedInfo> > seedMap;
+  
+  /// Map of globals to their representative memory object.
+  std::map<const llvm::GlobalValue*, MemoryObject*> globalObjects;
+
+  /// Map of globals to their bound address. This also includes
+  /// globals that have no representative object (i.e. functions).
+  std::map<const llvm::GlobalValue*, ref<ConstantExpr> > globalAddresses;
+
+  // TPot: the global array optimization requires a map where values are 
+  // not necessarily constant.
+  std::map<const llvm::GlobalValue*, ref<Expr> > globalAddressesTpotWrapper;
+  std::map<uint64_t, ref<Expr>> tpotGlobalAddressSubst;
+
+  /// Map of legal function addresses to the corresponding Function.
+  /// Used to validate and dereference function pointers.
+  std::unordered_map<std::uint64_t, llvm::Function*> legalFunctions;
+
+  /// When non-null the bindings that will be used for calls to
+  /// klee_make_symbolic in order replay.
+  const struct KTest *replayKTest;
+
+  /// When non-null a list of branch decisions to be used for replay.
+  const std::vector<bool> *replayPath;
+
+  /// The index into the current \ref replayKTest or \ref replayPath
+  /// object.
+  unsigned replayPosition;
+
+  /// When non-null a list of "seed" inputs which will be used to
+  /// drive execution.
+  const std::vector<struct KTest *> *usingSeeds;  
+
+  /// Disables forking, instead a random path is chosen. Enabled as
+  /// needed to control memory usage. \see fork()
+  bool atMemoryLimit;
+
+  /// Disables forking, set by client. \see setInhibitForking()
+  bool inhibitForking;
+
+  /// Signals the executor to halt execution at the next instruction
+  /// step.
+  bool haltExecution;  
+
+  /// Whether implied-value concretization is enabled. Currently
+  /// false, it is buggy (it needs to validate its writes).
+  bool ivcEnabled;
+
+  /// The maximum time to allow for a single core solver query.
+  /// (e.g. for a single STP query)
+  time::Span coreSolverTimeout;
+
+  /// Maximum time to allow for a single instruction.
+  time::Span maxInstructionTime;
+
+  /// Assumes ownership of the created array objects
+  ArrayCache arrayCache;
+
+  /// File to print executed instructions to
+  std::unique_ptr<llvm::raw_ostream> debugInstFile;
+
+  // @brief Buffer used by logBuffer
+  std::string debugBufferString;
+
+  // @brief buffer to store logs before flushing to file
+  llvm::raw_string_ostream debugLogBuffer;
+
+  /// Optimizes expressions
+  ExprOptimizer optimizer;
+
+  /// Points to the merging searcher of the searcher chain,
+  /// `nullptr` if merging is disabled
+  MergingSearcher *mergingSearcher = nullptr;
+
+  /// Typeids used during exception handling
+  std::vector<ref<Expr>> eh_typeids;
+
+  bool isSmokeTest;
+
+  int maxSmokeTestCount;
+
+  std::vector<std::string> apiFunctions;
+  struct LambdaMemo {
+    std::vector<ref<Expr>> arguments;
+
+    ref<Expr> non_null_constr;
+    ref<Expr> result;
+
+    const ObjectState *dummyObject;
+    ref<Expr> fzoneResPath;
+
+    MemoryObject *candidateObject;
+  };
+
+  std::map<llvm::Function *, struct LambdaMemo> lambdaMemos;
+
+  std::set<llvm::Function *> tpotAPIFunctions;
+
+  std::map<std::string, std::set<std::string>> tpotInvariantRestrictions;
+
+  unsigned numLeakyPaths = 0;
+
+  /// Return the typeid corresponding to a certain `type_info`
+  ref<ConstantExpr> getEhTypeidFor(ref<Expr> type_info);
+
+  llvm::Function* getTargetFunction(llvm::Value *calledVal,
+                                    ExecutionState &state);
+
+  void executeInstruction(ExecutionState &state, KInstruction *ki);
+
+  void run(ExecutionState &initialState);
+
+  // Given a concrete object in our [klee's] address space, add it to 
+  // objects checked code can reference.
+  MemoryObject *addExternalObject(ExecutionState &state, void *addr, 
+                                  unsigned size, bool isReadOnly);
+
+  void initializeGlobalAlias(const llvm::Constant *c);
+  void initializeGlobalObject(ExecutionState &state, ObjectState *os, 
+			      const llvm::Constant *c,
+			      unsigned offset);
+  void initializeGlobals(ExecutionState &state);
+  void allocateGlobalObjects(ExecutionState &state);
+  void initializeGlobalAliases();
+  void initializeGlobalObjects(ExecutionState &state);
+
+  void stepInstruction(ExecutionState &state);
+  void updateStates(ExecutionState *current);
+  void transferToBasicBlock(llvm::BasicBlock *dst, 
+			    llvm::BasicBlock *src,
+			    ExecutionState &state);
+
+  void callExternalFunction(ExecutionState &state,
+                            KInstruction *target,
+                            llvm::Function *function,
+                            std::vector< ref<Expr> > &arguments);
+
+  // Output parameter non_null_constr is an expression that constrains
+  // all return values that are not constant 0 to be non-zero.
+  // This is useful for pointer-returning functions.
+  ref<Expr> computeLambda(ExecutionState &state, llvm::Function *f,
+                  std::vector<ref<Expr> > &arguments,
+                  ref<Expr> *non_null_constr = NULL,
+                  MemoryObject *dummyObject = NULL, 
+                  bool *mustReturnTrue = NULL,
+                  /* instantiating fzone elements is not safe if the purpose is to memoize*/
+                  enum LambdaPurpose purpose = MEMOIZE,
+                  /* this is a dirty solution that allows invariants to claim objects before the leak check*/
+                  bool nameParentsObjects = false);
+
+  bool lambdaMustReturnTrue(ExecutionState &state, llvm::Function *f,
+                  std::vector<ref<Expr> > &arguments,
+                  /* this is a dirty solution that allows invariants to claim objects before the leak check*/
+                  bool nameParentsObjects = false);
+
+  ref<Expr> getLambdaPathCondition(ExecutionState &state);
+
+  // helper function for computeLambda
+  void updateNonNullConstraint(ref<Expr> *non_null_constr, const ref<Expr> &path_result);
+
+  // Uses memoization to compute a lambda over the initial state when properties
+  // need to be instantiated.
+  ref<Expr> computeLambdaMemoized(ExecutionState &state, llvm::Function *f,
+                  std::vector<ref<Expr> > &arguments, ref<Expr> *non_null_constr, const ObjectState *acutalObject);
+
+  // ref<Expr> computeLoopInvariant(ExecutionState &state, llvm::Function *hint,
+  //                  void *incSchema, std::vector<std::pair<KInstruction *, unsigned>> modifiedVars);
+
+  ref<Expr> invSchema_0(ExecutionState &state, llvm::Function *hint,
+                   std::vector<KInstruction *> modifiedVars);
+
+
+  ObjectState *bindObjectInState(ExecutionState &state, const MemoryObject *mo,
+                                 bool isLocal, const Array *array = 0);
+
+  /// Resolve a pointer to the memory objects it could point to the
+  /// start of, forking execution when necessary and generating errors
+  /// for pointers to invalid locations (either out of bounds or
+  /// address inside the middle of objects).
+  ///
+  /// \param results[out] A list of ((MemoryObject,ObjectState),
+  /// state) pairs for each object the given address can point to the
+  /// beginning of.
+  typedef std::vector< std::pair<std::pair<const MemoryObject*, const ObjectState*>, 
+                                 ExecutionState*> > ExactResolutionList;
+  void resolveExact(ExecutionState &state,
+                    ref<Expr> p,
+                    ExactResolutionList &results,
+                    const std::string &name);
+
+  /// Allocate and bind a new object in a particular state. NOTE: This
+  /// function may fork.
+  ///
+  /// \param isLocal Flag to indicate if the object should be
+  /// automatically deallocated on function return (this also makes it
+  /// illegal to free directly).
+  ///
+  /// \param target Value at which to bind the base address of the new
+  /// object.
+  ///
+  /// \param reallocFrom If non-zero and the allocation succeeds,
+  /// initialize the new object from the given one and unbind it when
+  /// done (realloc semantics). The initialized bytes will be the
+  /// minimum of the size of the old and new objects, with remaining
+  /// bytes initialized as specified by zeroMemory.
+  ///
+  /// \param allocationAlignment If non-zero, the given alignment is
+  /// used. Otherwise, the alignment is deduced via
+  /// Executor::getAllocationAlignment
+  void executeAlloc(ExecutionState &state,
+                    ref<Expr> size,
+                    bool isLocal,
+                    KInstruction *target,
+                    bool zeroMemory=false,
+                    const ObjectState *reallocFrom=0,
+                    size_t allocationAlignment=0);
+
+  /// Free the given address with checking for errors. If target is
+  /// given it will be bound to 0 in the resulting states (this is a
+  /// convenience for realloc). Note that this function can cause the
+  /// state to fork and that \ref state cannot be safely accessed
+  /// afterwards.
+  void executeFree(ExecutionState &state,
+                   ref<Expr> address,
+                   KInstruction *target = 0);
+
+  /// Serialize a landingpad instruction so it can be handled by the
+  /// libcxxabi-runtime
+  MemoryObject *serializeLandingpad(ExecutionState &state,
+                                    const llvm::LandingPadInst &lpi,
+                                    bool &stateTerminated);
+
+  /// Unwind the given state until it hits a landingpad. This is used
+  /// for exception handling.
+  void unwindToNextLandingpad(ExecutionState &state);
+
+  void executeCall(ExecutionState &state, 
+                   KInstruction *ki,
+                   llvm::Function *f,
+                   std::vector< ref<Expr> > &arguments);
+  
+  //! TODO: fix this. SpecialFuncitonHandler should not use executeMemoryOperation
+  //! in order to name objects.
+  public:
+  enum memop_type {MEMOP_READ, MEMOP_WRITE, MEMOP_NAME, MEMOP_NOP};
+
+  // do address resolution / object binding / out of bounds checking
+  // and perform the operation
+  void executeMemoryOperation(ExecutionState &state,
+                                      memop_type mop,
+                                      ref<Expr> address,
+                                      ref<Expr> value /* undef if not write */,
+                                      KInstruction *target /* undef if not read */,
+                                      Expr::Width objSize  /* undef if not name */,
+                                      std::string name  /* undef if not name */);
+  private:
+  MemOpResult trySingleResolution(ExecutionState &state,
+                                        memop_type op,
+                                        ref<Expr> address,
+                                        ref<Expr> value /* undef if not write */,
+                                        KInstruction *target /* undef if not read */,
+                                        Expr::Width objSize  /* undef if not name */,
+                                        std::string name  /* undef if not name */,
+                                        AddressSpace &as, 
+                                        unsigned bytes,
+                                        Expr::Width type,
+                                        bool useHeapConstraints = false,
+                                        bool useFZoneConstraints = false,
+                                        int fZoneIdx = -1);
+
+  MemOpResult tryMultipleResolution(ExecutionState &state,
+                                            memop_type op,
+                                            ref<Expr> address,
+                                            ref<Expr> value /* undef if not write */,
+                                            KInstruction *target /* undef if not read */,
+                                            Expr::Width objSize  /* undef if not name */,
+                                            std::string name  /* undef if not name */,
+                                            AddressSpace &as,
+                                            unsigned bytes,
+                                            Expr::Width type,
+                                            ExecutionState *&oobState,
+                                            bool useHeapConstraints = false,
+                                            bool useFZoneConstraints = false,
+                                            int fZoneIdx = -1,
+                                            ref<Expr> extraConstraint = NULL);
+
+  // helper for instantiateForallElem
+  ref<Expr> computeSimplifiedOffset(ExecutionState &state, ref<Expr> address, ref<Expr> base, bool &success);
+
+  void instantiateForallElem(ExecutionState &state,
+                            const MemoryObject *mo,
+                            ref<Expr> offset,
+                            ref<Expr> address);
+
+  bool forallElemInstantiated(ExecutionState &state, ForallElemProperty *fep, ref<Expr> address);
+
+  void executeInBoundsMemOp(ExecutionState &state,
+                                    AddressSpace &as,
+                                    memop_type mop,
+                                    const MemoryObject *mo,
+                                    const ObjectState *os,
+                                    ref<Expr> offset,
+                                    ref<Expr> address,
+                                    ref<Expr> value, /* undef if not write */
+                                    KInstruction *target /* undef if not read */,
+                                    std::string name  /* undef if not name */,
+                                    Expr::Width type
+                                    );
+
+  void updateAddressSimplTable(ExecutionState &state,
+      ref<Expr> address, ref<Expr> simpl);
+
+  // helper
+  bool addressSimpl_tryZero(ExecutionState &state, ref<Expr> expr);
+
+  // address == base + offset and inbounds of the object at base.
+  void learnAddressSimpl(ExecutionState &state,
+      ref<Expr> address, ref<Expr> base, ref<Expr> offset);
+
+
+  void executeMemOpInFreshInstance(ExecutionState &state, const ForallZone *fzone, 
+                                      memop_type mop,
+                                      ref<Expr> address, 
+                                      ref<Expr> value, /* undef if not write */
+                                      KInstruction *target /* undef if not read */,
+                                      std::string name  /* undef if not name */,
+                                      Expr::Width type); 
+
+  void createFZoneInstance(ExecutionState &state, const ForallZone *fzone, ref<Expr> address);
+
+  MemOpResult resolveInHavocedMem(ExecutionState &state,
+                                            memop_type mop,
+                                            ref<Expr> address,
+                                            ref<Expr> value /* undef if not write */,
+                                            KInstruction *target /* undef if not read */,
+                                            Expr::Width objSize  /* undef if not name */,
+                                            std::string name  /* undef if not name */,
+                                            AddressSpace &as,
+                                            unsigned bytes,
+                                            Expr::Width type,
+                                            ExecutionState *&oobState);
+
+  bool checkHeapSafety(ExecutionState &state, ref<Expr> address, unsigned bytes, bool useFZoneConstraints, int &fZoneIdx);
+  bool checkHeapSafety(ExecutionState &state, ref<Expr> address, ref<Expr> bytes, bool useFZoneConstraints, int &fZoneIdx);
+
+  ref<Expr> simplifyPointer(ExecutionState &state, ref<Expr> ptr);
+
+  MemoryObject *createFreshHeapObject(ExecutionState &state, ref<Expr> address, unsigned bytes);
+
+  MemOpResult resolveInHeap(ExecutionState &state,
+                                            memop_type mop,
+                                            ref<Expr> address,
+                                            ref<Expr> value /* undef if not write */,
+                                            KInstruction *target /* undef if not read */,
+                                            Expr::Width objSize  /* undef if not name */,
+                                            std::string name  /* undef if not name */,
+                                            AddressSpace &as,
+                                            unsigned bytes,
+                                            Expr::Width type,
+                                            ExecutionState *&oobState,
+                                            bool useFZoneConstraints = false,
+                                            bool tryMultiple = false);
+
+
+  // ** The NOOP functions below exist because we curently don't have separation between
+  // ** address resolution and actually executing the memop. 
+  // TODO: refactor to avoid code duplication.
+
+  NoOpResolutionList resolveAddressNoOp(ExecutionState &state,
+                                      ref<Expr> address,
+                                      ref<Expr> value /* undef if not write */,
+                                      KInstruction *target /* undef if not read */,
+                                      Expr::Width objSize  /* undef if not name */,
+                                      std::string name  /* undef if not name */);
+
+  const MemoryObject * trySingleResolutionNoOp(ExecutionState &state,
+                                        ref<Expr> address,
+                                        ref<Expr> value /* undef if not write */,
+                                        KInstruction *target /* undef if not read */,
+                                        Expr::Width objSize  /* undef if not name */,
+                                        std::string name  /* undef if not name */,
+                                        AddressSpace &as, 
+                                        unsigned bytes,
+                                        Expr::Width type,
+                                        bool useHeapConstraints = false, 
+                                        bool useFZoneConstraints = false,
+                                        int fZoneIdx = -1);
+
+  NoOpResolutionList resolveInHeapNoOp(ExecutionState &state,
+                                            ref<Expr> address,
+                                            ref<Expr> value /* undef if not write */,
+                                            KInstruction *target /* undef if not read */,
+                                            Expr::Width objSize  /* undef if not name */,
+                                            std::string name  /* undef if not name */,
+                                            AddressSpace &as,
+                                            unsigned bytes,
+                                            Expr::Width type,
+                                            ExecutionState *&oobState,
+                                            bool useFZoneConstraints = false);
+
+  NoOpResolutionList multipleResolutionNoOp(ExecutionState &state,
+                                            ref<Expr> address,
+                                            ref<Expr> value /* undef if not write */,
+                                            KInstruction *target /* undef if not read */,
+                                            Expr::Width objSize  /* undef if not name */,
+                                            std::string name  /* undef if not name */,
+                                            AddressSpace &as,
+                                            unsigned bytes,
+                                            Expr::Width type,
+                                            ExecutionState *&oobState,
+                                            bool useFZoneConstraints,
+                                            int fZoneIdx = -1);
+
+  NoOpResolutionList handleFZoneResolutionNoOp(ExecutionState &state, const ForallZone *fzone, ref<Expr> address, unsigned bytes,
+                                     ref<Expr> value /* undef if not write */,
+                                     KInstruction *target /* undef if not read */,
+                                     std::string name  /* undef if not name */,
+                                     Expr::Width type);
+
+  NoOpResolutionList resolveInHavocedMemNoOp(ExecutionState &state,
+                                            ref<Expr> address,
+                                            ref<Expr> value /* undef if not write */,
+                                            KInstruction *target /* undef if not read */,
+                                            Expr::Width objSize  /* undef if not name */,
+                                            std::string name  /* undef if not name */,
+                                            AddressSpace &as,
+                                            unsigned bytes,
+                                            Expr::Width type,
+                                            ExecutionState *&oobState);
+
+
+  int findFZoneIdx(ExecutionState &state, const ForallZone *fzone);
+  const ForallZone *findFZone(ExecutionState &state, int fZoneIdx);
+  ref<Expr> determineOffset(ExecutionState &state, ref<Expr> address, int fZoneIdx);
+  ref<Expr> determineOffset(ExecutionState &state, ref<Expr> address, const MemoryObject *mo ,ref<Expr> extraConstraints);
+
+  ref<Expr> getDistinctnessConstraint(ExecutionState &state, const ForallZone *fzone);
+  ref<Expr> doTpotSimplifications(ExecutionState &state, ref<Expr> expr);
+
+  void handleFZoneResolution(ExecutionState &state, const ForallZone *fzone, ref<Expr> address, unsigned bytes,
+                            memop_type mop,
+                            ref<Expr> value /* undef if not write */,
+                            KInstruction *target /* undef if not read */,
+                            std::string name  /* undef if not name */,
+                            Expr::Width type);
+  void addFZoneChild(ExecutionState &state, const ForallZone *fzone, SytSSMemoryObject *smo);
+
+  bool checkForLeaks(ExecutionState &state);
+
+  void addUninterpretedFunction(llvm::Function *f);
+
+  void executeMakeSymbolic(ExecutionState &state, const MemoryObject *mo,
+                           const std::string &name);
+
+  /// Create a new state where each input condition has been added as
+  /// a constraint and return the results. The input state is included
+  /// as one of the results. Note that the output vector may include
+  /// NULL pointers for states which were unable to be created.
+  void branch(ExecutionState &state, const std::vector<ref<Expr>> &conditions,
+              std::vector<ExecutionState *> &result, BranchType reason);
+
+  /// Fork current and return states in which condition holds / does
+  /// not hold, respectively. One of the states is necessarily the
+  /// current state, and one of the states may be null.
+  StatePair fork(ExecutionState &current, ref<Expr> condition, bool isInternal,
+                 BranchType reason, bool useHeapConstraints = false);
+
+  // If the MaxStatic*Pct limits have been reached, concretize the condition and
+  // return it. Otherwise, return the unmodified condition.
+  ref<Expr> maxStaticPctChecks(ExecutionState &current, ref<Expr> condition);
+
+  /// Add the given (boolean) condition as a constraint on state. This
+  /// function is a wrapper around the state's addConstraint function
+  /// which also manages propagation of implied values,
+  /// validity checks, and seed patching.
+  void addConstraint(ExecutionState &state, ref<Expr> condition);
+
+  bool addConstraintGuarded(ExecutionState &state, ref<Expr> condition, bool failureIsFatal=true, std::string annotation="");
+
+  // Called on [for now] concrete reads, replaces constant with a symbolic
+  // Used for testing.
+  ref<Expr> replaceReadWithSymbolic(ExecutionState &state, ref<Expr> e);
+
+  const Cell& eval(KInstruction *ki, unsigned index, 
+                   ExecutionState &state) const;
+
+  Cell& getArgumentCell(ExecutionState &state,
+                        KFunction *kf,
+                        unsigned index) {
+    return state.stack.back().locals[kf->getArgRegister(index)];
+  }
+
+  Cell& getDestCell(ExecutionState &state,
+                    KInstruction *target) {
+    return state.stack.back().locals[target->dest];
+  }
+
+  void bindLocal(KInstruction *target, 
+                 ExecutionState &state, 
+                 ref<Expr> value);
+  void bindArgument(KFunction *kf, 
+                    unsigned index,
+                    ExecutionState &state,
+                    ref<Expr> value);
+
+  /// Evaluates an LLVM constant expression.  The optional argument ki
+  /// is the instruction where this constant was encountered, or NULL
+  /// if not applicable/unavailable.
+  ref<klee::ConstantExpr> evalConstantExpr(const llvm::ConstantExpr *c,
+					   const KInstruction *ki = NULL);
+
+  /// Evaluates an LLVM constant.  The optional argument ki is the
+  /// instruction where this constant was encountered, or NULL if
+  /// not applicable/unavailable.
+  ref<klee::ConstantExpr> evalConstant(const llvm::Constant *c,
+				       const KInstruction *ki = NULL);
+
+  ref<klee::Expr> evalConstantTpotWrapper(const llvm::Constant *c,
+               const KInstruction *ki = NULL);
+
+  /// Return a unique constant value for the given expression in the
+  /// given state, if it has one (i.e. it provably only has a single
+  /// value). Otherwise return the original expression.
+  ref<Expr> toUnique(const ExecutionState &state, ref<Expr> &e);
+
+  /// Return a constant value for the given expression, forcing it to
+  /// be constant in the given state by adding a constraint if
+  /// necessary. Note that this function breaks completeness and
+  /// should generally be avoided.
+  ///
+  /// \param purpose An identify string to printed in case of concretization.
+  ref<klee::ConstantExpr> toConstant(ExecutionState &state, ref<Expr> e, 
+                                     const char *purpose);
+
+  /// Bind a constant value for e to the given target. NOTE: This
+  /// function may fork state if the state has multiple seeds.
+  void executeGetValue(ExecutionState &state, ref<Expr> e, KInstruction *target);
+
+  /// Get textual information regarding a memory address.
+  std::string getAddressInfo(ExecutionState &state, ref<Expr> address) const;
+
+  /// Retrieve counterexample for failed invariant or assertions
+  void getCounterExample(ExecutionState &state, TimingSolver *solver,
+                        const ConstraintSet &constraints, ref<Expr> expr,
+                        SolverQueryMetaData &metadata);
+
+  /// Retrieve code-path for failed invariant or assertions
+  void getFailingCodePath(ExecutionState &state);
+
+  // Determines the \param lastInstruction of the \param state which is not KLEE
+  // internal and returns its InstructionInfo
+  const InstructionInfo & getLastNonKleeInternalInstruction(const ExecutionState &state,
+      llvm::Instruction** lastInstruction);
+
+  /// Remove state from queue and delete state
+  void terminateState(ExecutionState &state);
+
+  /// Call exit handler and terminate state normally
+  /// (end of execution path)
+  void terminateStateOnExit(ExecutionState &state, ref<Expr> retVal);
+
+  /// Call exit handler and terminate state early
+  /// (e.g. due to state merging or memory pressure)
+  void terminateStateEarly(ExecutionState &state, const llvm::Twine &message,
+                           StateTerminationType terminationType);
+
+  /// Call error handler and terminate state in case of program errors
+  /// (e.g. free()ing globals, out-of-bound accesses)
+  void terminateStateOnError(ExecutionState &state, const llvm::Twine &message,
+                             StateTerminationType terminationType,
+                             const llvm::Twine &longMessage = "",
+                             const char *suffix = nullptr);
+
+  /// Call error handler and terminate state in case of execution errors
+  /// (things that should not be possible, like illegal instruction or
+  /// unlowered intrinsic, or unsupported intrinsics, like inline assembly)
+  void terminateStateOnExecError(ExecutionState &state,
+                                 const llvm::Twine &message,
+                                 const llvm::Twine &info = "");
+
+  /// Call error handler and terminate state in case of solver errors
+  /// (solver error or timeout)
+  void terminateStateOnSolverError(ExecutionState &state,
+                                   const llvm::Twine &message);
+
+  /// Call error handler and terminate state for user errors
+  /// (e.g. wrong usage of klee.h API)
+  void terminateStateOnUserError(ExecutionState &state,
+                                 const llvm::Twine &message);
+
+  /// bindModuleConstants - Initialize the module constant table.
+  void bindModuleConstants();
+
+  template <typename SqType, typename TypeIt>
+  void computeOffsetsSeqTy(KGEPInstruction *kgepi,
+                           ref<ConstantExpr> &constantOffset, uint64_t index,
+                           const TypeIt it);
+
+  template <typename TypeIt>
+  void computeOffsets(KGEPInstruction *kgepi, TypeIt ib, TypeIt ie);
+
+  /// bindInstructionConstants - Initialize any necessary per instruction
+  /// constant values.
+  void bindInstructionConstants(KInstruction *KI);
+
+  void doImpliedValueConcretization(ExecutionState &state,
+                                    ref<Expr> e,
+                                    ref<ConstantExpr> value);
+
+  /// check memory usage and terminate states when over threshold of -max-memory + 100MB
+  /// \return true if below threshold, false otherwise (states were terminated)
+  bool checkMemoryUsage();
+
+  /// check if branching/forking is allowed
+  bool branchingPermitted(const ExecutionState &state) const;
+
+  void printDebugInstructions(ExecutionState &state);
+  void doDumpStates();
+
+  /// Only for debug purposes; enable via debugger or klee-control
+  void dumpStates();
+  void dumpPTree();
+
+  ref<Expr> convertToInteger(ExecutionState &state, ref<Expr> bitvec);
+
+public:
+  Executor(llvm::LLVMContext &ctx, const InterpreterOptions &opts,
+      InterpreterHandler *ie, std::string sytInitConstraints);
+  virtual ~Executor();
+
+  const InterpreterHandler& getHandler() {
+    return *interpreterHandler;
+  }
+
+  void setPathWriter(TreeStreamWriter *tsw) override { pathWriter = tsw; }
+
+  void setSymbolicPathWriter(TreeStreamWriter *tsw) override {
+    symPathWriter = tsw;
+  }
+
+  void setReplayKTest(const struct KTest *out) override {
+    assert(!replayPath && "cannot replay both buffer and path");
+    replayKTest = out;
+    replayPosition = 0;
+  }
+
+  void setReplayPath(const std::vector<bool> *path) override {
+    assert(!replayKTest && "cannot replay both buffer and path");
+    replayPath = path;
+    replayPosition = 0;
+  }
+
+  void setSytPostConstraints(std::string filename) override;
+
+  llvm::Module *setModule(std::vector<std::unique_ptr<llvm::Module>> &modules,
+                          const ModuleOptions &opts) override;
+
+  virtual void initializeSolver(std::string sytInitConstraints) override ;
+
+  void useSeeds(const std::vector<struct KTest *> *seeds) override {
+    usingSeeds = seeds;
+  }
+
+  void runFunctionAsMain(llvm::Function *f, int argc, char **argv,
+                         char **envp) override;
+
+  void runFunctionInSyt(llvm::Function *f) override;
+
+  void readTPotConfig(std::string filename) override;
+  void addTpotAPIFunction(llvm::Function *f) {
+    tpotAPIFunctions.insert(f);
+  }
+  void addInvariantRestriction(const std::string &potName, const std::vector<std::string> &invNames) {
+    std::set<std::string> invNamesSet(invNames.begin(), invNames.end());
+    tpotInvariantRestrictions[potName] = invNamesSet;
+  }
+
+  void applyInvariantRestrictions(const std::string &mainFnName) override;
+
+  /*** Runtime options ***/
+
+  void setHaltExecution(bool value) override { haltExecution = value; }
+
+  void setInhibitForking(bool value) override { inhibitForking = value; }
+
+  void prepareForEarlyExit() override;
+
+  /*** State accessor methods ***/
+
+  unsigned getPathStreamID(const ExecutionState &state) override;
+
+  unsigned getSymbolicPathStreamID(const ExecutionState &state) override;
+
+  void getConstraintLog(const ExecutionState &state, std::string &res,
+                        Interpreter::LogType logFormat =
+                            Interpreter::STP) override;
+
+  bool getSymbolicSolution(
+      const ExecutionState &state,
+      std::vector<std::pair<std::string, std::vector<unsigned char>>> &res)
+      override;
+
+  void getCoveredLines(const ExecutionState &state,
+                       std::map<const std::string *, std::set<unsigned>> &res)
+      override;
+
+  void setSmokeTest(bool value) override { isSmokeTest = value; };
+
+  void setMaxSmokeTestCount(unsigned int value) override { maxSmokeTestCount = value; };
+
+  void setAPIFunctions(std::vector<std::string> apiFunctions) override { this->apiFunctions = apiFunctions; };
+
+  void trySolveVariableInSmokeTest(
+      ExecutionState &state, std::vector<std::string> &failedVariables,
+      bool &hasSuccess, ExecutionState *&eq_state,
+      const std::pair<const MemoryObject *, ref<ObjectState>> &entry);
+
+  Expr::Width getWidthForLLVMType(llvm::Type *type) const;
+  size_t getAllocationAlignment(const llvm::Value *allocSite) const;
+
+  /// Returns the errno location in memory of the state
+  int *getErrnoLocation(const ExecutionState &state) const;
+
+  MergingSearcher *getMergingSearcher() const { return mergingSearcher; };
+  void setMergingSearcher(MergingSearcher *ms) { mergingSearcher = ms; };
+};
+  
+} // End klee namespace
+
+#endif /* KLEE_EXECUTOR_H */

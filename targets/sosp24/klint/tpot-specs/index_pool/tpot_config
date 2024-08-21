@@ -1,0 +1,6 @@
+; API functions
+index_pool_alloc
+index_pool_borrow
+index_pool_refresh
+index_pool_used
+index_pool_return

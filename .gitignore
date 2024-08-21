@@ -1,0 +1,35 @@
+.vscode
+
+# tpot artifacts
+*.smt2
+z3_cache
+
+# output directories
+o.*
+xv6-out
+
+# local files
+local
+
+*.ll
+*.no-opt
+*.d
+compile_commands.json
+.clangd/
+
+klee-out-*/
+klee-last
+.cache
+tests/a.out
+*.o.cmd
+*.o
+.idea
+.clang-format
+
+targets/examples/playground/
+
+out.perf-folded
+perf.data
+.z3-trace
+
+.tmp

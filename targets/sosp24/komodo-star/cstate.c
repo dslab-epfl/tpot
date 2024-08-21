@@ -1,0 +1,31 @@
+unsigned long mhartid_cstate;
+unsigned long mvendorid_cstate;
+unsigned long mimpid_cstate;
+unsigned long misa_cstate;
+unsigned long marchid_cstate;
+unsigned long mscratch_cstate;
+unsigned long mcause_cstate;
+unsigned long mtval_cstate;
+unsigned long mepc_cstate;
+unsigned long mstatus_cstate;
+unsigned long mcounteren_cstate;
+unsigned long medeleg_cstate;
+unsigned long mideleg_cstate;
+
+unsigned long sscratch_cstate;
+unsigned long scause_cstate;
+unsigned long stval_cstate;
+unsigned long sepc_cstate;
+unsigned long sstatus_cstate;
+unsigned long satp_cstate;
+unsigned long stvec_cstate;
+unsigned long scounteren_cstate;
+unsigned long sip_cstate;
+unsigned long sie_cstate;
+
+unsigned long pmpcfg0_cstate;
+unsigned long pmpcfg2_cstate;
+unsigned long pmpaddr2_cstate;
+unsigned long pmpaddr3_cstate;
+unsigned long pmpaddr4_cstate;
+unsigned long pmpaddr5_cstate;

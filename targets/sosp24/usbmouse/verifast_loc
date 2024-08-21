@@ -1,0 +1,647 @@
+################## usb_mouse.c ##################
+predicate_family_instance complete_t_pred_fam(usb_mouse_irq)(
+	real fracsize,
+	struct urb *urb, struct usb_device *usb_dev, void *buffer, dma_addr_t buffer_dma, int buffer_alloc_size, bool user_alloc_dma, usb_complete_t complete, struct usb_mouse *mouse, void *setup
+) =
+	[1/2]mouse->data |-> buffer &*&
+	[1/2]mouse->dev |-> ?inputdev &*&
+	buffer_alloc_size == 8 &*&
+	[1/4]input_dev_reportable(inputdev, mouse);
+predicate_family_instance complete_t_pred_fam_out(usb_mouse_irq)(real fracsize,
+	struct urb *urb, struct usb_device *usb_dev, void *buffer, dma_addr_t buffer_dma, int buffer_alloc_size, bool user_alloc_dma, usb_complete_t complete, void *context, void *setup
+)= 
+	complete_t_pred_fam(usb_mouse_irq)(fracsize, urb, usb_dev, buffer, buffer_dma, buffer_alloc_size, user_alloc_dma, complete, context, setup) &*&
+   	urb_struct(true,
+		urb, usb_dev, buffer, buffer_dma,buffer_alloc_size, user_alloc_dma, complete, context, setup
+	);
+/*@ requires
+		urb_struct(true,
+			urb, ?usb_dev, ?buffer, ?buffer_dma, ?buffer_alloc_size, ?user_alloc_dma, ?complete, ?context, ?setup
+		)
+		&*& buffer != 0
+		&*& permission_to_submit_urb(?urbs_submitted, true)
+		&*& complete_t_pred_fam(usb_mouse_irq)(?fracsize,
+			urb, usb_dev, buffer, buffer_dma,buffer_alloc_size, user_alloc_dma, complete, context, setup
+		)
+		&*& current_thread_in_cb(currentThread, false);
+	@*/
+	/*@ ensures 
+		permission_to_submit_urb(_, true)
+		&*& current_thread_in_cb(currentThread, ?deferred_data_xfer)
+		&*& deferred_data_xfer ?
+			complete_t_pred_fam(usb_mouse_irq)(fracsize,
+				urb, usb_dev, buffer, buffer_dma,buffer_alloc_size, user_alloc_dma, complete, context, setup
+			)
+		:
+			complete_t_pred_fam_out(usb_mouse_irq)(fracsize,
+				urb, usb_dev, buffer, buffer_dma,buffer_alloc_size, user_alloc_dma, complete, context, setup
+			)
+		;
+	//@ open urb_struct(true, urb, usb_dev, buffer, buffer_dma, buffer_alloc_size, user_alloc_dma, complete, context, setup);
+	//@ open complete_t_pred_fam(usb_mouse_irq)(fracsize, urb, usb_dev, buffer, buffer_dma, buffer_alloc_size, user_alloc_dma, complete, context, setup);
+		//@ close complete_t_pred_fam(usb_mouse_irq)(fracsize, urb, usb_dev, buffer, buffer_dma,buffer_alloc_size, user_alloc_dma, complete, context, setup);
+		//@ close complete_t_pred_fam_out(usb_mouse_irq)(fracsize, urb, usb_dev, buffer, buffer_dma,buffer_alloc_size, user_alloc_dma, complete, context, setup);
+	//@ uchars_to_chars(data);
+	//@ close urb_struct(true, urb, usb_dev, buffer, buffer_dma, buffer_alloc_size, user_alloc_dma, complete, context, setup);
+	//@ close usb_submit_urb_ghost_arg(true, fracsize);
+	//@ close complete_t_pred_fam(usb_mouse_irq)(fracsize, urb, usb_dev, buffer, buffer_dma,buffer_alloc_size, user_alloc_dma, complete, context, setup);
+		//@ close complete_t_pred_fam_out(usb_mouse_irq)(fracsize, urb, usb_dev, buffer, buffer_dma,buffer_alloc_size, user_alloc_dma, complete, context, setup);
+predicate_family_instance userdef_input_drvdata(usb_mouse_open, usb_mouse_close, usb_mouse_event_dummy)(struct input_dev *inputdev, bool is_opened, struct usb_mouse *mouse, real fracsize) =
+  [1/2]mouse->usbdev |-> ?usbdev &*&
+  [1/2]mouse->irq |-> ?irq_urb &*&
+  [1/2]mouse->data_dma |-> ?data_dma &*&
+  [1/4]mouse->data |-> ?data &*&
+  [1/4]mouse->dev |-> inputdev &*&
+  ( is_opened == false ? 
+    [1/2]mouse->dev |-> inputdev &*&
+    [1/2]mouse->data |-> data
+  : 
+    true) &*&
+  permission_to_submit_urb(_, false) &*&
+  !is_opened ?	
+    urb_struct(true, irq_urb, usbdev, data, data_dma, 8, true, usb_mouse_irq, mouse, 0) &*& data != 0
+  :
+    urb_submitted(fracsize, irq_urb, usbdev, data, data_dma, 8, true, usb_mouse_irq, mouse, 0) &*& data != 0 &*& [1/4]input_dev_reportable(inputdev, mouse)
+predicate_family_instance input_open_callback_link(usb_mouse_open)(void* close_cb, void* event_cb) =
+  close_cb == usb_mouse_close &*& event_cb == usb_mouse_event_dummy;
+	/*@ requires userdef_input_drvdata(usb_mouse_open, ?close_cb, ?event_cb)(dev, false, ?context, ?fracsize)
+		&*& input_open_callback_link(usb_mouse_open)(close_cb, event_cb)
+		&*& [1/2]input_dev_reportable(dev, context)
+	@*/
+	/*@ ensures
+		&*& input_open_callback_link(usb_mouse_open)(close_cb, event_cb)
+		&*& result == 0 ? // success
+			userdef_input_drvdata(usb_mouse_open, close_cb, event_cb)(dev, true, context, fracsize)
+		: // failure
+			userdef_input_drvdata(usb_mouse_open, close_cb, event_cb)(dev, false, context, fracsize)
+			&*& [1/2]input_dev_reportable(dev, context)
+	//@ open input_open_callback_link(usb_mouse_open)(close_cb, event_cb);
+	//@ close input_open_callback_link(usb_mouse_open)(close_cb, event_cb);
+	//@ open userdef_input_drvdata(usb_mouse_open, usb_mouse_close, usb_mouse_event_dummy)(dev, false, mouse, fracsize);
+	//@ close urb_struct(true, mouse->irq, mouse->usbdev, mouse->data, mouse->data_dma, 8, true, usb_mouse_irq, mouse,  _);
+	//@ close usb_submit_urb_ghost_arg(false, fracsize);
+	/*@ close complete_t_pred_fam(usb_mouse_irq)(fracsize,
+			mouse->irq, mouse->usbdev, mouse->data, mouse->data_dma, 8, true, usb_mouse_irq, mouse, 0
+	//@ close urb_struct(true, mouse->irq, mouse->usbdev, buffer, mouse->data_dma, 8, true, usb_mouse_irq, mouse,  _);
+		/*@ open complete_t_pred_fam(usb_mouse_irq)(fracsize,
+			mouse->irq, mouse->usbdev, mouse->data, mouse->data_dma, 8, true, usb_mouse_irq, mouse, 0
+		//@ close urb_struct(true, urb, _, buffer, _, _, true, _, _, _);
+		//@ close userdef_input_drvdata(usb_mouse_open, usb_mouse_close, usb_mouse_event_dummy)(dev, false, context, fracsize);
+	//@ close userdef_input_drvdata(usb_mouse_open, usb_mouse_close, usb_mouse_event_dummy)(dev, true, context, fracsize);
+predicate_family_instance input_close_callback_link(usb_mouse_close)(void* open_cb, void* event_cb) =
+  open_cb == usb_mouse_open &*& event_cb == usb_mouse_event_dummy;
+predicate_family_instance input_event_callback_link(usb_mouse_event_dummy)(void* open_cb, void* event_cb) =
+  true;
+/*@ requires userdef_input_drvdata(?open_cb, usb_mouse_close, ?event_cb)(dev, true, ?data, ?fracsize) &*& not_in_interrupt_context(currentThread)
+		&*& input_close_callback_link(usb_mouse_close)(open_cb, event_cb);
+	@*/
+	/*@ ensures  userdef_input_drvdata(open_cb, usb_mouse_close, event_cb)(dev, false, data, fracsize)
+		&*& input_close_callback_link(usb_mouse_close)(open_cb, event_cb)
+		&*& [1/2]input_dev_reportable(dev, data)
+	//@ open input_close_callback_link(usb_mouse_close)(open_cb, event_cb);
+	//@ close input_close_callback_link(usb_mouse_close)(open_cb, event_cb);
+	//@ open userdef_input_drvdata(usb_mouse_open, usb_mouse_close, usb_mouse_event_dummy)(dev, true, data, fracsize);
+	//@ assert urb_submitted(fracsize, ?irq_urb, ?usb_dev, ?buffer, ?buffer_dma, ?buffer_alloc_size, ?user_alloc_dma, ?complete, ?context, ?setup);
+	//@ close times_urb_submitted(0, fracsize, irq_urb, usb_dev, buffer, buffer_dma, buffer_alloc_size, user_alloc_dma, complete, context, setup);
+	//@ close times_urb_submitted(1, fracsize, irq_urb, usb_dev, buffer, buffer_dma, buffer_alloc_size, user_alloc_dma, complete, context, setup);
+	//@ open times_complete_t_pred_fam_out(1, _, _, _, _, _, _, _, _, _, _);
+	//@ open complete_t_pred_fam_out(usb_mouse_irq)(_, _, _, _, _, _, _, _, _, _);
+	//@ open complete_t_pred_fam(usb_mouse_irq)(_, _, _, _, _, _, _, _, _, _);
+	//@ close userdef_input_drvdata(usb_mouse_open, usb_mouse_close, usb_mouse_event_dummy)(dev, false, data, fracsize);
+	//@ open times_complete_t_pred_fam_out(0, _, _, _, _, _, _, _, _, _, _);
+predicate_family_instance userdef_usb_interface_data(usb_mouse_probe, usb_mouse_disconnect)(struct usb_interface *intf, struct usb_device *usb_device, struct usb_mouse *mouse, real probe_disconnect_fraction_size) =
+  mouse != 0 &*&
+  true && (void*) mouse->phys != 0 &*& 
+  input_dev_registered(?inputdev, mouse->name, 128, 1, mouse->phys, 64, 1, usb_mouse_open, usb_mouse_close, usb_mouse_event_dummy, mouse, probe_disconnect_fraction_size) &*&
+  [1/2]mouse->usbdev |-> usb_device &*&
+  [1/4]mouse->dev |-> inputdev  &*&
+  [1/2]mouse->irq |-> ?urb &*&
+  [1/4]mouse->data |-> ?data &*&
+  [1/2]input_dev_reportable(inputdev, mouse) &*&
+  [1/2]mouse->data_dma |-> ?data_dma &*&
+  struct_usb_mouse_padding(mouse) &*&
+  kmalloc_block(mouse, sizeof(struct usb_mouse)) &*&
+  [probe_disconnect_fraction_size]probe_disconnect_userdata(usb_mouse_probe, usb_mouse_disconnect)();
+predicate_family_instance usb_probe_callback_link(usb_mouse_probe)(void* disconnect_cb) =
+  usb_mouse_disconnect == disconnect_cb;
+lemma void forall_equals_all_eq_char_of_uchar(list<unsigned char> ucs)
+    requires forall(ucs, (equals)(unit, 0)) == true;
+    ensures all_eq(map(char_of_uchar, ucs), 0) == true;
+{
+    switch (ucs) {
+        case nil:
+        case cons(uc, ucs0):
+            forall_equals_all_eq_char_of_uchar(ucs0);
+    }
+/*@ requires
+		usb_interface(usb_mouse_probe, ?disconnect_cb, intf, _, ?originalData, false, ?fracsize)
+		&*& permission_to_submit_urb(?urbs_submitted, false)-
+		&*& [fracsize]probe_disconnect_userdata(usb_mouse_probe, disconnect_cb)()
+		&*& [?callback_link_f]usb_probe_callback_link(usb_mouse_probe)(disconnect_cb);
+	@*/
+	/*@ ensures
+		&*& [callback_link_f]usb_probe_callback_link(usb_mouse_probe)(disconnect_cb)
+		&*& result == 0 ? // success
+			// probe_disconnect_userdata is not returned, so the user "has to put it somewhere",
+			// and give it back with _disconnect.
+			// you can put it in usb_interface: it includes userdata which
+			// can eat whatever probe_disconnect_userdata contains.
+			usb_interface(usb_mouse_probe, disconnect_cb, intf, _, ?data, true, fracsize)
+			//&*& permission_to_submit_urb(_, false)
+		: // failure
+			usb_interface(usb_mouse_probe, disconnect_cb, intf, _, ?data, false, fracsize)
+			
+			// XXX meh, the permission count thing is annoying and I don't think it actually
+			// solves much at all, so made it "_" for now.
+			&*& permission_to_submit_urb(_, false)
+			&*& data == originalData || data == 0
+			&*& [fracsize]probe_disconnect_userdata(usb_mouse_probe, _)()
+	//@ open [callback_link_f]usb_probe_callback_link(usb_mouse_probe)(disconnect_cb);
+	//@ close [callback_link_f]usb_probe_callback_link(usb_mouse_probe)(disconnect_cb);
+	//@ open usb_interface(usb_mouse_probe, _, _, _, _, _, _);
+	//@ open [?f2]usb_host_interface(interface);
+	//@ open [?f3]usb_interface_descriptor(&interface->desc, ?bNumEndpoints, ?bInterfaceNumber);
+		//@ close [f3]usb_interface_descriptor(&interface->desc, bNumEndpoints, bInterfaceNumber);
+		//@ close [f2]usb_host_interface(interface);
+		//@ close usb_interface(usb_mouse_probe, disconnect_cb, intf, _, originalData, false, fracsize);
+	//@ open usb_host_endpoint(interface->endpoint);
+	 	//@ close usb_host_endpoint(interface->endpoint);
+	 	//@ close [f3]usb_interface_descriptor(&interface->desc, bNumEndpoints, bInterfaceNumber);
+		//@ close [f2]usb_host_interface(interface);
+		//@ close usb_interface(usb_mouse_probe, disconnect_cb, intf, _, originalData, false, fracsize);
+	// original: maxp = usb_maxpacket(dev, pipe, usb_pipeout(pipe));
+	//@ assert uchars((void *)mouse, sizeof(struct usb_mouse), ?mouse_ucs);
+	//@ uchars_to_chars(mouse);
+	//@ forall_equals_all_eq_char_of_uchar(mouse_ucs);
+	//@ close_struct_zero(mouse);
+	//@ assert chars((void*) &mouse->name, 128, ?zeros);
+	//@ assume(mem(0, zeros)); // follows because kzalloc is used
+	//@ assert chars((void*) &mouse->phys, 64, ?zeros2);
+	//@ assume(mem(0, zeros2)); // follows because kzalloc is used
+	//@ signed char* data_tmp = mouse->data;
+		//@ close usb_mouse_data_dma(mouse, _);
+		//@ open_struct(mouse);
+		//@ chars__to_uchars_(mouse);
+ 128/*sizeof(mouse->name)*
+			strlcat(mouse->name, " ", 128/*sizeof(mouse->name)*/);
+		strlcat(mouse->name, dev->product, 128/*sizeof(mouse->name)*/);
+	usb_make_path(dev, mouse->phys, 64/*sizeof(mouse->phys)*/);
+	strlcat(mouse->phys, "/input0", 64/*sizeof(mouse->phys)*/);
+	//@ open input_dev_unregistered(input_dev, _, _, _, _, _, _);
+	//@ close usb_device(dev, _);
+	//@ open usb_device(dev, _);
+	//@ close input_dev_unregistered(input_dev, _, _, _, _, _, _);
+	//@ open input_dev_unregistered(input_dev, _, _, _, _, _, _);
+	//@ close usb_device(dev, _);
+	//@ close complete_t_ghost_param(usb_mouse_irq, usb_mouse_irq);
+	/*@ urb_transfer_flags_add_no_transfer_dma_map(
+		mouse->irq, data_tmp, mouse->data_dma, 8, mouse->irq->transfer_flags); @*/
+	//@ assert mouse->irq |-> ?irq;
+	//@ close urb_struct(true, irq, _, data_tmp, mouse->data_dma, 8, true, usb_mouse_irq, mouse, 0);
+	//@ close input_open_t_ghost_param(usb_mouse_open, usb_mouse_open);
+	//@ close input_close_t_ghost_param(usb_mouse_close, usb_mouse_close);
+	//@ assume(is_input_event_t_no_pointer(usb_mouse_event_dummy) == true); // HACK HACK HACK, there are no events for this driver
+	//@ close input_event_t_ghost_param(usb_mouse_event_dummy, usb_mouse_event_dummy);
+	//@ close input_dev_unregistered(input_dev, _, _, _, _, _, _);
+	//@ input_ghost_register_device(input_dev, fracsize);
+	//@ close input_open_callback_link(usb_mouse_open)(usb_mouse_close, usb_mouse_event_dummy);
+	//@ close input_close_callback_link(usb_mouse_close)(usb_mouse_open, usb_mouse_event_dummy);
+	//@ close input_event_callback_link(usb_mouse_event_dummy)(usb_mouse_open, usb_mouse_close);
+	//@ assert input_dev_ghost_registered(_, _, _, _, _, _, _, _, ?input_register_result);
+	//@ assume( true && (void*) 0 != ((void*) mouse->phys));
+	//@ assert chars(mouse->phys, 64, ?phys_text);
+	//@ close maybe_chars(1, mouse->phys, 64, phys_text);
+		//@ open maybe_chars(1, _, _, _);
+		//@ open input_open_callback_link(usb_mouse_open)(usb_mouse_close, usb_mouse_event_dummy);
+		//@ open input_close_callback_link(usb_mouse_close)(usb_mouse_open, usb_mouse_event_dummy);
+		//@ open input_event_callback_link(usb_mouse_event_dummy)(usb_mouse_open, usb_mouse_close);
+		//@ open input_open_t_ghost_param(usb_mouse_open, usb_mouse_open);
+		//@ open input_close_t_ghost_param(usb_mouse_close, usb_mouse_close);
+		//@ open input_event_t_ghost_param(usb_mouse_event_dummy, usb_mouse_event_dummy);
+	//@ close usb_interface_descriptor(&interface->desc, 1, _);
+	//@ close usb_host_endpoint(interface->endpoint);
+	//@ close [f2]usb_host_interface(interface);
+	//@ close usb_interface(usb_mouse_probe, usb_mouse_disconnect, intf, dev, originalData, false, fracsize);
+	//@ close userdef_usb_interface_data(usb_mouse_probe, usb_mouse_disconnect)(intf, dev, mouse, fracsize);
+   	//@ close urb_struct_maybe(true, irq, _, _, _, _, _, _, _, _);
+	//@ open_struct(mouse);
+	//@ chars__to_uchars_(mouse);
+	//@ close [f3]usb_interface_descriptor(&interface->desc, bNumEndpoints, bInterfaceNumber);
+	//@ close usb_host_endpoint(interface->endpoint);
+	//@ close [f2]usb_host_interface(interface);
+	//@ close usb_interface(usb_mouse_probe, disconnect_cb, intf, _, originalData, false, fracsize);
+predicate_family_instance usb_disconnect_callback_link(usb_mouse_disconnect)(void* probe_cb) = 
+  probe_cb == usb_mouse_probe;
+	/*@ requires usb_interface(?probe_cb, usb_mouse_disconnect, intf, ?dev, ?data, true, ?fracsize)
+		&*& [?callback_link_f]usb_disconnect_callback_link(usb_mouse_disconnect)(probe_cb)
+	/*@ ensures
+		usb_interface(probe_cb, usb_mouse_disconnect, intf, dev, 0, false, fracsize)
+		&*& [callback_link_f]usb_disconnect_callback_link(usb_mouse_disconnect)(probe_cb)
+		&*& [fracsize]probe_disconnect_userdata(probe_cb, usb_mouse_disconnect)()
+		&*& permission_to_submit_urb(_, false);
+	//@ open [callback_link_f]usb_disconnect_callback_link(usb_mouse_disconnect)(probe_cb);
+	//@ close [callback_link_f]usb_disconnect_callback_link(usb_mouse_disconnect)(probe_cb);
+	//@ open userdef_usb_interface_data(usb_mouse_probe, usb_mouse_disconnect)(intf, dev, data, fracsize);
+	 	//@ close times_urb_submitted(0, 0, mouse->irq, 0, 0, 0, 0, true, 0, 0, 0);
+		//@ open times_complete_t_pred_fam_out(0, _, _, _, _, _, _, _, _, _, _);
+		//@ open userdef_input_drvdata(usb_mouse_open, usb_mouse_close, usb_mouse_event_dummy)(_, false, _, _);
+		//@ close urb_struct(true, mouse->irq, dev, mouse->data, mouse->data_dma, 8, true, usb_mouse_irq, mouse, 0);
+		//@ close urb_struct_maybe(true, mouse->irq, dev, mouse->data, mouse->data_dma, 8, true, usb_mouse_irq, mouse, 0);
+		//@ open maybe_chars(_, _, _, _);
+		//@ open_struct(mouse);
+		//@ open input_close_callback_link(usb_mouse_close)(usb_mouse_open, usb_mouse_event_dummy);
+		//@ open input_open_callback_link(usb_mouse_open)(usb_mouse_close, usb_mouse_event_dummy);
+		//@ open input_event_callback_link(usb_mouse_event_dummy)(usb_mouse_open, usb_mouse_close);
+
+		################## linux/*##################
+typedef void input_close_t_no_pointer (struct input_dev *dev);
+	/*@ requires userdef_input_drvdata(?open_cb, this, ?event_cb)(dev, true, ?data, ?fracsize) &*& not_in_interrupt_context(currentThread)
+		&*& input_close_callback_link(this)(open_cb, event_cb);
+	@*/
+	/*@ ensures  userdef_input_drvdata(open_cb, this, event_cb)(dev, false, data, fracsize)
+		&*& input_close_callback_link(this)(open_cb, event_cb)
+		&*& [1/2]input_dev_reportable(dev, data)
+	@*/
+typedef input_close_t_no_pointer* input_close_t;
+//@ predicate input_close_t_ghost_param(input_close_t_no_pointer *cb1, input_close_t cb2) = is_input_close_t_no_pointer(cb1) == true &*& cb1 == cb2;
+	predicate input_dev_unregistered_private(struct input_dev *input_dev, void *userdata);
+	predicate input_dev_unregistered(struct input_dev *input_dev, char *name,  char *phys, input_open_t open_callback, input_close_t close_cb, input_event_t event_cb, void *userdata) =
+		input_dev_open(input_dev, open_callback) // "input_dev->open" conflicts with parsing of open ghost statement I guess.
+		&*& input_dev_close(input_dev, close_cb)
+		&*& input_dev->event |-> event_cb
+		&*& input_dev->name |-> name
+		&*& input_dev->phys |-> phys
+		&*& input_dev->id.bustype |-> _
+		&*& input_id_vendor(&input_dev->id, _)
+		&*& input_id_product(&input_dev->id, _)
+		&*& input_id_version(&input_dev->id, _)
+		&*& input_dev_unregistered_private(input_dev, userdata)
+		&*& input_dev->evbit |-> ?evbit
+		&*& input_dev->ledbit |-> ?ledbit
+		&*& input_dev->keybit |-> ?keybit
+		&*& ints(evbit, 1, _)
+		&*& ints(ledbit, 1, _)
+		&*& ints(keybit, 24, _)
+		&*& input_dev->led |-> ?led
+		&*& uints(led, 1, _)
+	predicate_family userdef_input_drvdata
+	(
+		input_open_t *open_cb,
+		input_close_t *close_cb,
+		input_event_t *event_cb
+	)(
+		struct input_dev *input_dev, bool is_opened, void *data, real fracsize	
+	);
+	// predicate_family input_open_callback_link(input_open_t open_cb)(input_close_t close_cb, input_event_t event_t);
+	// predicate_family input_close_callback_link(input_close_t close_cb)(input_open_t open_cb, input_event_t event_t);
+	// predicate_family input_event_callback_link(input_event_t event_t)(input_open_t open_cb, input_close_t close_cb);
+	// predicate input_dev_reportable(struct input_dev *input_dev, void *userdata;);
+	/*@ ensures
+		&*& result != 0 ?
+			input_dev_reportable(result,  0)
+			&*& input_dev_unregistered(result, 0, 0, _, _, _, 0)
+			true
+	/*@ requires
+		&*& dev != 0 ?
+			input_dev_unregistered(dev, ?name, ?phys, ?open_cb, ?close_cb, ?event_cb, ?userdata)
+			&*& input_dev_reportable(dev, userdata)
+			true // no-op.
+predicate input_dev_ghost_registered(struct input_dev *input_dev, char* name, char* phys, input_open_t open_cb, input_close_t close_cb, input_event_t event_cb, void *userdata, real fracsize, int return_value);
+lemma int input_ghost_register_device(struct input_dev *dev, real fracsize);
+	requires input_dev_unregistered(dev, ?name, ?phys, ?open_cb, ?close_cb, ?event_cb, ?userdata);
+	ensures input_dev_ghost_registered(dev, name, phys, open_cb, close_cb, event_cb, userdata, fracsize, result);
+predicate maybe_chars(real f, char* p, int length, list<char> data;) =
+  p == 0 ?
+    true
+    [f]chars(p, length, data); 
+	/*@ requires input_dev_ghost_registered(dev, ?name, ?phys, ?open_cb, ?close_cb, ?event_cb, ?userdata, ?fracsize, ?ghost_result)
+		&*& input_open_t_ghost_param(open_cb, open_cb)
+		&*& input_close_t_ghost_param(close_cb, close_cb)
+		&*& input_event_t_ghost_param(event_cb, event_cb)
+		&*& [?f]chars(name, ?name_length, ?cs) &*& mem('\0', cs) == true
+		&*& maybe_chars(?f2, phys, ?phys_length, ?cs2) &*& phys == 0 || mem('\0', cs2) == true
+		&*& [1/2]input_dev_reportable(dev, userdata) // why [1/2]? See comments at predicate.
+		&*& ghost_result == 0 ?
+			userdef_input_drvdata(open_cb, close_cb, event_cb)(dev, false, userdata, fracsize)
+	/*@ ensures
+		&*& result == ghost_result
+		&*& result == 0 ? // success
+			input_dev_registered(dev, name, name_length, f, phys, phys_length, f2, open_cb, close_cb, event_cb, userdata, fracsize)
+			input_dev_unregistered(dev, name, phys, open_cb, close_cb, event_cb, userdata)
+			&*& [f]chars(name, name_length, cs)
+			&*& maybe_chars(f2, phys, phys_length, cs2)
+			//&*& userdef_input_drvdata(dev, false, open_cb, close_cb, event_cb, userdata, fracsize)
+			&*& [1/2]input_dev_reportable(dev, userdata)
+	/*@ requires
+		input_dev_registered(dev, ?name, ?name_length, ?name_frac, ?phys, ?phys_length, ?phys_frac, ?open_cb, ?close_cb, ?event_cb, ?userdata, ?fracsize)
+		
+		// After unregistration, you can't do anything with the device anymore
+		// even not freeing or reporting events (source: input's sourcecode specs).
+		&*& [1/2]input_dev_reportable(dev, userdata);
+	/*@ ensures
+		userdef_input_drvdata(open_cb, close_cb, event_cb)(dev, false, userdata, fracsize)
+		&*& input_open_callback_link(open_cb)(close_cb, event_cb)
+		&*& input_close_callback_link(close_cb)(open_cb, event_cb)
+		&*& input_event_callback_link(event_cb)(open_cb, close_cb)
+		&*& [name_frac]chars(name, name_length, _)
+		&*& maybe_chars(phys_frac, phys, phys_length, _);
+	/*@ requires
+		input_dev_unregistered(dev, ?name, ?phys, ?open_cb, ?close_cb, ?event_cb, ?original_userdata)
+		&*& input_dev_reportable(dev, original_userdata);
+	/*@ ensures
+		input_dev_unregistered(dev, name, phys, open_cb, close_cb, event_cb, data)
+		&*& input_dev_reportable(dev, data);
+	//@ requires [?f]input_dev_reportable(dev, ?userdata);
+	//@ ensures [f]input_dev_reportable(dev, userdata) &*& result == userdata;
+void input_report_key(struct input_dev *dev, /*unsigned*/ int code, int value);
+	//@ requires [?f]input_dev_reportable(dev, ?userdata); // XXX hm I thought they synchronize but I should recheck this.
+	//@ ensures [f]input_dev_reportable(dev, userdata);
+void input_report_rel(struct input_dev *dev, unsigned int code, int value);
+	//@ requires [?f]input_dev_reportable(dev, ?userdata); // XXX hm I thought they synchronize but I should recheck this.
+	//@ ensures [f]input_dev_reportable(dev, userdata);
+void input_sync(struct input_dev *dev);
+	//@ requires [?f]input_dev_reportable(dev, ?userdata); // XXX hm I thought they synchronize but I should recheck this.
+	//@ ensures [f]input_dev_reportable(dev, userdata);
+######## slab_def.h ########
+	/*@ requires
+		ptr == 0 ?
+			true
+		:
+			kmalloc_block(ptr, ?size)
+			&*& uchars_(ptr,size,?cs)
+	//@ ensures true;
+    /*@ requires size >= 0
+	@*/
+	/*@ ensures
+		(result == 0 ? // failure
+			true
+		: // success
+			kmalloc_block(result, size)
+			&*& uchars(result, size, ?chars)
+######## usb.h ########
+/*@ predicate usb_device(struct usb_device *usb_device, struct usb_endpoint_descriptor *ep0;) =
+	usb_device_private(usb_device)
+	&*& usb_endpoint_descriptor(ep0, USB_DIR_OUT, USB_ENDPOINT_XFER_CONTROL, ?pipe)
+// 	&*& usb_endpoint_descriptor_data(ep0, 0 /* = endpoint address *///)
+// 	&*& usb_device->product |-> ?product &*& string(product, _)
+// 	&*& usb_device->manufacturer |-> ?manufacturer &*& string(manufacturer, _)
+// 	&*& usb_device->serial |-> ?serial &*& string(serial, _)	
+// ;
+// @*/
+//@ predicate usb_device_private(struct usb_device *usb_device;);
+//@ predicate current_thread_in_cb(int thread, bool deferred_data_xfer);
+typedef void usb_complete_t_no_pointer (struct urb *urb);
+	/*@ requires
+		urb_struct(true,
+			urb, ?usb_dev, ?buffer, ?buffer_dma, ?buffer_alloc_size, ?user_alloc_dma, ?complete, ?context, ?setup
+		)
+		&*& buffer != 0
+		&*& permission_to_submit_urb(?urbs_submitted, true)
+		&*& complete_t_pred_fam(this)(?fracsize,
+			urb, usb_dev, buffer, buffer_dma,buffer_alloc_size, user_alloc_dma, complete, context, setup
+		)
+		&*& current_thread_in_cb(currentThread, false);
+	@*/
+	/*@ ensures 
+		permission_to_submit_urb(_, true)
+		&*& current_thread_in_cb(currentThread, ?deferred_data_xfer)
+		&*& deferred_data_xfer ?
+			complete_t_pred_fam(this)(fracsize,
+				urb, usb_dev, buffer, buffer_dma,buffer_alloc_size, user_alloc_dma, complete, context, setup
+			)
+		:
+			complete_t_pred_fam_out(this)(fracsize,
+				urb, usb_dev, buffer, buffer_dma,buffer_alloc_size, user_alloc_dma, complete, context, setup
+			)
+		;
+typedef usb_complete_t_no_pointer* usb_complete_t;
+predicate urb_private(struct urb *urb, bool initialized, struct usb_device *dev, dma_addr_t data_dma, int actual_allocated_data_size, int flags, void *setup_packet;);
+@*/
+/*@ predicate urb_struct(
+	bool initialized,
+	struct urb *urb, struct usb_device *usb_dev, void *buffer, dma_addr_t buffer_dma, int buffer_alloc_size, bool user_alloc_dma, usb_complete_t complete, void *context, void *setup;
+	) =
+	[1/2]urb->status |-> ?status
+	&*& urb->dev |-> usb_dev
+	&*& urb->transfer_flags |-> ?data_transfer_flags
+	&*& urb->transfer_dma |-> buffer_dma
+	&*& urb->context |-> context
+	&*& urb != 0
+	&*& urb_private(urb, initialized, usb_dev, buffer_dma, buffer_alloc_size, data_transfer_flags, setup)
+	&*& (buffer != 0 ?
+		uchars(buffer, buffer_alloc_size, ?cs)
+	:true)
+	&*& (initialized ?
+		complete_t_ghost_param(complete, complete)
+	:true)
+	&*& (user_alloc_dma ?
+		buffer != 0
+		&*& true == ((data_transfer_flags | URB_NO_TRANSFER_DMA_MAP) == data_transfer_flags)
+		&*& usb_alloc_coherent_block(buffer, usb_dev, buffer_alloc_size, buffer_dma)
+		true)
+predicate urb_struct_maybe(bool initialized, 
+struct urb *urb, struct usb_device *usb_dev, void *buffer, dma_addr_t buffer_dma, int buffer_alloc_size, bool user_alloc_dma, usb_complete_t complete, void *context, void *setup;) =
+	urb == 0 ?
+		true // which means you can choose garbage for the other parameters.
+	:
+		urb_struct(initialized, urb, usb_dev, buffer, buffer_dma,buffer_alloc_size, user_alloc_dma, complete, context, setup)
+	;
+// predicate urb_submitted(
+// 	real fracsize,
+// 	struct urb *urb, struct usb_device *usb_dev, void *buffer, dma_addr_t buffer_dma, int buffer_alloc_size, bool user_alloc_dma, usb_complete_t complete, void *context, void *setup
+// );
+/*@ requires
+	// iso_packets must be null for non-isochronous URBs, and we don't support isochronous URBs yet.
+	iso_packets == 0
+@*/
+/*@ ensures
+	&*& result == 0 ?
+		true
+	:
+		urb_struct(false, result, ?dev, 0, ?data_dma, ?data_size, false,
+			0, // set to 0 in usb_init_urb (assuming memsetting 0 results in zeroed function pointers)
+			0, // analogues (assuming memsetting 0 results in int with value 0)
+void usb_free_urb(struct urb *urb);
+	//@ requires urb_struct_maybe(?initialized, urb, ?dev, ?data, ?data_dma, ?data_size, ?has_dma, ?complete_fn, ?context, ?setup_packet);
+	/*@ ensures
+		urb == 0 ?
+			true // freeing zero.
+		:
+			(data != 0 ?
+				uchars(data, data_size, ?cs)
+		
+				&*& has_dma?
+					usb_alloc_coherent_block(data, dev, data_size, data_dma)
+				:
+					true
+			:true)
+			
+			&*& (setup_packet != 0 ?
+				uchars(setup_packet, 8, ?setup_packet_cs)
+			:true)
+//@ predicate usb_alloc_coherent_block(void *ptr; struct usb_device *dev, int size, int dma);
+void *usb_alloc_coherent(struct usb_device *dev, size_t size, gfp_t mem_flags, dma_addr_t* dma);
+	/*@ requires
+		&*& size >= 0 &*& integer(dma, ?ptr);
+	@*/
+	/*@ ensures 
+		&*& result == 0 ?
+			integer(dma, ptr)
+		:
+			usb_alloc_coherent_block(result, dev, size, ?ptr2) &*& integer(dma, ptr2)
+			&*& uchars(result, size, ?cs)
+		;
+	@*/
+void usb_free_coherent(struct usb_device *dev, size_t size, void *addr, dma_addr_t dma);
+	/*@ requires
+		&*& addr == 0 ?
+			true
+		:
+			usb_alloc_coherent_block(addr, dev, size, dma)
+			&*& uchars(addr, size, ?cs)
+	@*/
+predicate usb_submit_urb_ghost_arg(bool deferred_data_xfer, real fracsize) = true;
+/*@ requires
+	urb_struct(true,
+		urb, ?usb_dev, ?buffer, ?buffer_dma, ?buffer_alloc_size, ?user_alloc_dma, ?complete, ?context, ?setup
+	)
+	&*& buffer != 0
+	&*& permission_to_submit_urb(?urbs_submitted, ?inside_completion)
+	&*& (mem_flags != GFP_ATOMIC ?
+	:
+		true
+	)
+	&*& usb_submit_urb_ghost_arg(?deferred_data_xfer, ?fracsize)
+/*@ ensures
+	&*& result == 0 ? // success
+		permission_to_submit_urb(urbs_submitted+1, inside_completion)
+			urb_submitted(
+				fracsize,
+				urb, usb_dev, buffer, buffer_dma,buffer_alloc_size, user_alloc_dma, complete, context, setup
+			)
+		permission_to_submit_urb(urbs_submitted, inside_completion)
+		&*& urb_struct(true,
+			urb, usb_dev, buffer, buffer_dma,buffer_alloc_size, user_alloc_dma, complete, context, setup
+		)
+		&*& deferred_data_xfer ?
+			current_thread_in_cb(currentThread, false)
+		:
+			complete_t_pred_fam(complete)(
+				fracsize,
+				urb, usb_dev, buffer, buffer_dma,buffer_alloc_size, user_alloc_dma, complete, context, setup
+	struct urb *urb, struct usb_device *usb_dev, void *buffer, dma_addr_t buffer_dma, int buffer_alloc_size, bool user_alloc_dma, usb_complete_t complete, void *context, void *setup
+	) =
+	times >= 0
+	&*& times == 0 ?
+		true
+		urb_submitted(fracsize,
+			urb, usb_dev, buffer, buffer_dma,buffer_alloc_size, user_alloc_dma, complete, context, setup
+		)
+		&*& times_urb_submitted(times-1, fracsize,
+			urb, usb_dev, buffer, buffer_dma,buffer_alloc_size, user_alloc_dma, complete, context, setup
+predicate times_complete_t_pred_fam_out (int times, real fracsize,
+	struct urb *urb, struct usb_device *usb_dev, void *buffer, dma_addr_t buffer_dma, int buffer_alloc_size, bool user_alloc_dma, usb_complete_t complete, void *context, void *setup
+	) =
+	times >= 0
+	&*& times == 0 ?
+		true
+		complete_t_pred_fam_out(complete)(fracsize,
+			urb, usb_dev, buffer, buffer_dma,buffer_alloc_size, user_alloc_dma, complete, context, setup
+		)
+		&*& times_complete_t_pred_fam_out(times-1,
+			fracsize,
+			urb, usb_dev, buffer, buffer_dma,buffer_alloc_size, user_alloc_dma, complete, context, setup
+void usb_kill_urb(struct urb *urb);
+	times_urb_submitted(?times, ?fracsize,
+		urb, ?usb_dev, ?buffer, ?buffer_dma, ?buffer_alloc_size, ?user_alloc_dma, ?complete, ?context, ?setup
+	)
+@*/
+/*@ ensures
+	&*& times_complete_t_pred_fam_out(times, fracsize,
+		urb, usb_dev, buffer, buffer_dma,buffer_alloc_size, user_alloc_dma, complete, context, setup
+	)
+	;
+predicate_family complete_t_pred_fam(usb_complete_t complete)(
+	real fracsize,
+	struct urb *urb, struct usb_device *usb_dev, void *buffer, dma_addr_t buffer_dma, int buffer_alloc_size, bool user_alloc_dma, usb_complete_t complete, void *context, void *setup
+predicate_family complete_t_pred_fam_out(usb_complete_t complete)(
+	real fracsize,
+	struct urb *urb, struct usb_device *usb_dev, void *buffer, dma_addr_t buffer_dma, int buffer_alloc_size, bool user_alloc_dma, usb_complete_t complete, void *context, void *setup
+	);
+/*@ predicate complete_t_ghost_param(usb_complete_t_no_pointer *complete_no_ptr, usb_complete_t complete;) =
+	is_usb_complete_t_no_pointer(complete) == true
+	&*& complete_no_ptr == complete;
+	/*@ requires urb_struct(_, urb, _, 0, ?data_dma, ?data_size, ?data_transfer_flags, ?original_complete_fn, ?original_context, ?setup_packet)
+		&*& [?f]usb_device(dev, ?ep0)
+		&*& [?f2]usb_endpoint_descriptor(?epd, USB_DIR_IN, ?xfer_type, pipe)
+		&*& transfer_buffer != 0
+		&*& uchars(transfer_buffer, ?length_transfer_buffer, ?cs)
+		&*& length_transfer_buffer >= buffer_length
+		&*& complete_t_ghost_param(complete_fn, complete_fn)
+		;
+	/*@ ensures urb_struct(true, urb, dev, transfer_buffer, data_dma, length(cs), data_transfer_flags, complete_fn, context, setup_packet)
+		&*& [f]usb_device(dev, ep0)
+		&*& [f2]usb_endpoint_descriptor(epd, USB_DIR_IN, xfer_type, pipe);
+	@*/
+/*@ predicate usb_host_interface(struct usb_host_interface *usb_host_interface) = 
+	usb_interface_descriptor(& usb_host_interface->desc, ?bNumEndpoints, ?bInterfaceNumber) &*&
+	bNumEndpoints > 0 ?
+		// This is actually an array, we currently only support the
+		// first element here (if there is a first element).
+		[?f]usb_host_interface->endpoint |-> ?endpoint
+		&*& usb_host_endpoint(endpoint)
+//@ predicate usb_interface_private(struct usb_interface *usb_interface, struct usb_device *usb_device, void *data, bool has_data, real probe_disconnect_fraction_size);
+/*@ predicate usb_interface(
+		vf_usb_operation_probe_t *probe_cb,
+		vf_usb_operation_disconnect_t *disconnect_cb,
+		struct usb_interface *usb_interface, struct usb_device *usb_device, void *data, bool has_data, real probe_disconnect_fraction_size
+	) =
+	[1/2] usb_interface->cur_altsetting |-> ?cur_altsetting
+	&*& usb_host_interface(cur_altsetting)
+	&*& usb_device(usb_device, ?ep0)
+	&*& usb_interface_private(usb_interface, usb_device, data, has_data, probe_disconnect_fraction_size)
+	&*& has_data ?
+		userdef_usb_interface_data(probe_cb, disconnect_cb)(usb_interface,usb_device, data, probe_disconnect_fraction_size)
+inline void usb_set_intfdata(struct usb_interface *intf, void *data);
+/*@ requires
+	// The implementation does not do any synchronisation, so we require a full fraction of usb_interface.
+	&*& usb_interface(?probe_cb, ?disconnect_cb, intf, ?dev, ?originalData, ?originalHasData, ?fracsize)
+	&*& data != 0 ?
+		userdef_usb_interface_data(probe_cb, disconnect_cb)(intf, dev, data, fracsize)
+	:
+		true
+	;
+@*/	
+/*@ ensures
+	&*& usb_interface(probe_cb, disconnect_cb, intf, dev, data, data != 0, fracsize)
+	&*& ( originalHasData ?
+		userdef_usb_interface_data(probe_cb, disconnect_cb)(intf, dev, originalData, fracsize)
+	:
+		true
+	);
+inline void *usb_get_intfdata(struct usb_interface *intf);
+/*@ requires usb_interface(?open_cb, ?close_cb, intf, ?dev, ?data, ?hasData, ?fracsize);
+/*@ ensures usb_interface(open_cb, close_cb, intf, dev, data, hasData, fracsize) &*& result == data;
+
+struct usb_device *interface_to_usbdev(struct usb_interface *intf);
+	//@ requires [?frac_intf] usb_interface(?open_cb, ?close_cb, intf, ?usb_device, ?data, ?hasData, ?fracsize);
+	/*@ ensures [frac_intf] usb_interface(open_cb, close_cb, intf, result, data, hasData, fracsize)
+		&*& result != 0
+		&*& result == usb_device
+		;
+	@*/
+int usb_rcvintpipe (struct usb_device *dev, __u8 endpoint);
+
+int usb_sndctrlpipe (struct usb_device *dev, __u8 endpoint);
+
+inline __u16 usb_maxpacket(struct usb_device *udev, int pipe, int is_out);
+	//@ requires [?f2]usb_endpoint_descriptor(?desc, ?dir, ?xfer_type, ?pipeOption);
+	/*@ ensures
+		[f2]usb_endpoint_descriptor(desc, dir, xfer_type, pipeOption)
+		&*& result != 0 ? // True, it is an OUT pipe.
+			dir == USB_DIR_OUT
+		: // No, it is an IN pipe.
+			dir == USB_DIR_IN
+		;
+	@*/
+inline int usb_make_path(struct usb_device *dev, char *buf, size_t size);

@@ -1,0 +1,97 @@
+# https://stackoverflow.com/questions/322936/common-gnu-makefile-directory-path
+TOP := $(dir $(lastword $(MAKEFILE_LIST)))
+
+# Options
+KLEE_BUILD_TYPE ?= Debug#							# Release, Debug
+#TPOT_LOG_OPTS										# -DTPOT_ENABLE_LOG_SOLVER_TIME
+													# -DTPOT_ENABLE_LOG_SIMPLIERS
+													# -DTPOT_ENABLE_LOG_STEPS
+													# -DTPOT_ENABLE_LOG_STEPS_VERBOSE
+													# -DTPOT_ENABLE_LOG_MEMORY_RESOLUTION
+
+ifeq ($(KLEE_BUILD_TYPE), Release)
+    TPOT_LOG_OPTS ?= -DTPOT_ENABLE_LOG_STEPS
+else ifeq ($(KLEE_BUILD_TYPE), Debug)
+    TPOT_LOG_OPTS ?= \
+		-DTPOT_ENABLE_LOG_SOLVER_TIME \
+		-DTPOT_ENABLE_LOG_SIMPLIFIERS	\
+		-DTPOT_ENABLE_LOG_STEPS	\
+		-DTPOT_ENABLE_LOG_STEPS_VERBOSE	\
+		-DTPOT_ENABLE_LOG_MEMORY_RESOLUTION
+else
+	$(error TPOT_LOG_OPTS set to $TPOT_LOG_OPTS. Valid options are "Release" or "Debug")
+endif
+
+KLEE_DIR=$(TOP)/klee-2.3
+KLEE_BUILD=$(KLEE_DIR)/build
+KLEE_EXC=$(KLEE_BUILD)/bin/klee
+
+LIBTPOT_SRC=$(TOP)/libtpot/libtpot.c
+
+SCRIPTS_DIR=$(TOP)/scripts
+
+KLEE_FLAGS= \
+	-emit-all-errors \
+	--use-independent-solver=false \
+	--search=dfs \
+	--use-cex-cache=false \
+	--use-branch-cache=false \
+	--external-calls=none \
+	--use-constant-arrays=false \
+	--klee-call-optimisation=false \
+	--use-z3-cache=$(Z3_CACHE) \
+	--inv-check-shortcuts \
+
+KLEE_DEBUG_FLAGS= \
+	--debug-print-instructions=all:stderr \
+	--debug-z3-dump-queries=./debug.smt2
+
+$(KLEE_EXC):
+	mkdir -p $(KLEE_BUILD)
+	cd $(KLEE_BUILD) && cmake -DTPOT_CFLAGS="$(TPOT_LOG_OPTS)" -DCMAKE_BUILD_TYPE=$(KLEE_BUILD_TYPE) -DLLVM_CONFIG_BINARY=/usr/bin/llvm-config-11 \
+							  -DENABLE_SOLVER_STP=false -DENABLE_SYSTEM_TESTS=false -DENABLE_UNIT_TESTS=false ..
+	$(MAKE) -j$(nproc) -C $(KLEE_BUILD)
+
+# -- tools -- #
+MKDIR_P      := mkdir -p
+
+LLVM_PREFIX  := "$(shell 'llvm-config-11' --bindir)/"
+LLVM_CC      := $(LLVM_PREFIX)clang -target x86_64-pc-linux-gnu -Wno-initializer-overrides -Xclang -disable-O0-optnone
+LLVM_LINK    := $(LLVM_PREFIX)llvm-link
+# ----------- #
+LIBTPOT_CFLAGS	+= 	-I$(TOP)/include
+LIBTPOT_CFLAGS  += 	-I$(TOP)/klee-2.3/include/klee
+$(O)/libtpot.ll: $(LIBTPOT_SRC)
+	$(Q)$(MKDIR_P) $(@D)
+	$(LLVM_CC) -g -o $@.no-opt -c -S -emit-llvm $(LIBTPOT_CFLAGS) $<
+	$(LLVM_PREFIX)opt -mem2reg -S -o $@~ $@.no-opt
+	$(Q)mv $@~ $@
+
+
+.PHONY:verify_% verify-init_% debug_% verify-all clean clean-tpot
+
+# Verification targets
+verify-init_%: $(O)/specs-linked.ll $(KLEE_EXC)
+	$(KLEE_EXC) $(KLEE_FLAGS) --assume-global-invs=false --entry-point=$(patsubst verify-init_%,%,$@)  $(O)/specs-linked.ll
+
+verify_%: $(O)/specs-linked.ll $(KLEE_EXC)
+	$(KLEE_EXC) $(KLEE_FLAGS) --entry-point=$(patsubst verify_%,%,$@) $(O)/specs-linked.ll
+
+debug_%: $(O)/specs-linked.ll $(KLEE_EXC)
+	gdb --args $(KLEE_EXC) $(KLEE_FLAGS) $(KLEE_DEBUG_FLAGS) --entry-point=$(patsubst debug_%,%,$@) $(O)/specs-linked.ll
+
+debug-init_%: $(O)/specs-linked.ll $(KLEE_EXC)
+	gdb --args $(KLEE_EXC) $(KLEE_FLAGS) --assume-global-invs=false $(KLEE_DEBUG_FLAGS) --entry-point=$(patsubst debug-init_%,%,$@) $(O)/specs-linked.ll
+
+verify-all: $(O)/specs-linked.ll $(KLEE_EXC)
+	$(SCRIPTS_DIR)/run_pots_parallel.sh . $(TARGET_SYSTEM) $(POTS)
+
+
+clean:
+	rm -rf $(O) cur_query.smt2 debug.smt2
+
+tpot: $(KLEE_EXC)
+	echo "TPot ($(KLEE_BUILD_TYPE)) successfully built with logging options $(TPOT_LOG_OPTS)"
+
+clean-tpot: 
+	rm -rf $(KLEE_BUILD)
