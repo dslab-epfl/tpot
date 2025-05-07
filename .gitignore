@@ -33,3 +33,6 @@ perf.data
 .z3-trace
 
 .tmp
+
+# keep unstable queries
+!unstable-queries/*.smt2
